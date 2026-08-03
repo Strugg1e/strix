@@ -63,7 +63,9 @@ export default function App() {
 }
 
 function ViewerApp() {
-  const [activeRun, setActiveRun] = useState<string | null>(null);
+  const [activeRun, setActiveRun] = useState<string | null>(
+    () => new URLSearchParams(window.location.search).get("run"),
+  );
   const [run, setRun] = useState<LoadedRun | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);

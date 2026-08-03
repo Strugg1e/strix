@@ -325,6 +325,94 @@ def test_console_api_requires_session_cookie(
         httpd.server_close()
 
 
+def test_viewer_run_link_keeps_all_data_and_steering_on_selected_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A run-B deep link must never fall back to the launched run-A data."""
+    base_dir = tmp_path / "strix_runs"
+    for run_name, marker in (("run-a", "A"), ("run-b", "B")):
+        run_dir = base_dir / run_name
+        run_dir.mkdir(parents=True)
+        (run_dir / "run.json").write_text(
+            json.dumps(
+                {
+                    "run_name": run_name,
+                    "status": "running",
+                    "start_time": "2026-08-02T00:00:00+00:00",
+                    "targets_info": [{"original": f"https://{marker.lower()}.example"}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        (run_dir / "vulnerabilities.json").write_text(
+            json.dumps([{"id": f"finding-{marker}", "title": f"Finding {marker}"}]),
+            encoding="utf-8",
+        )
+        (run_dir / "penetration_test_report.md").write_text(
+            f"# REPORT-{marker}", encoding="utf-8"
+        )
+
+    assets = tmp_path / "bundle"
+    assets.mkdir()
+    (assets / "index.html").write_text("<div>viewer</div>", encoding="utf-8")
+    monkeypatch.setattr("strix.interface.viewer.server.bundle_dir", lambda: assets)
+    monkeypatch.setattr(
+        "strix.interface.viewer.server.build_run_state",
+        lambda run_dir: {"agents": [{"id": run_dir.name}], "events": []},
+    )
+    steer_calls: list[tuple[str, str, str | None]] = []
+
+    def steer(agent_id: str, message: str, run_name: str | None = None) -> bool:
+        steer_calls.append((agent_id, message, run_name))
+        return run_name == "run-b"
+
+    httpd, url, token = serve(
+        base_dir / "run-a",
+        open_browser=False,
+        base_dir=base_dir,
+        console_manager=object(),
+        steer_handler=steer,
+    )
+    try:
+        status, _, set_cookie = _request(
+            authorized_url(url, token, extra_query={"run": "run-b"})
+        )
+        assert status == 200
+        assert set_cookie
+        cookie = set_cookie.split(";", 1)[0]
+
+        status, summary, _ = _request(f"{url}/api/run?run=run-b", cookie=cookie)
+        assert status == 200
+        assert summary["run_name"] == "run-b"
+
+        status, vulnerabilities, _ = _request(
+            f"{url}/api/vulnerabilities?run=run-b", cookie=cookie
+        )
+        assert status == 200
+        assert vulnerabilities == [{"id": "finding-B", "title": "Finding B"}]
+
+        status, report, _ = _request(f"{url}/api/report?run=run-b", cookie=cookie)
+        assert status == 200
+        assert report["markdown"] == "# REPORT-B"
+
+        status, transcript, _ = _request(f"{url}/api/transcript?run=run-b", cookie=cookie)
+        assert status == 200
+        assert transcript == {"agents": [{"id": "run-b"}], "events": []}
+
+        status, steer_result, _ = _request(
+            f"{url}/api/agents/steer",
+            method="POST",
+            cookie=cookie,
+            body={"agent_id": "root", "message": "focus B", "run_name": "run-b"},
+        )
+        assert status == 200
+        assert steer_result == {"ok": True}
+        assert steer_calls == [("root", "focus B", "run-b")]
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
 def test_profile_store_saves_metadata_without_api_key(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
