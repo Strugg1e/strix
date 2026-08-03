@@ -13,14 +13,14 @@ export default function FileEditRenderer({ toolName, args }: ToolRendererProps) 
   const regex = (args.regex as string) ?? "";
 
   let label: string;
-  if (toolName === "list_files") label = "list";
-  else if (toolName === "search_files") label = "search";
-  else if (command === "view") label = "view";
-  else if (command === "create") label = "create";
-  else if (command === "str_replace") label = "edit";
-  else if (command === "undo_edit") label = "undo";
-  else if (command === "insert") label = "insert";
-  else label = "file";
+  if (toolName === "list_files") label = "列表";
+  else if (toolName === "search_files") label = "搜索";
+  else if (command === "view") label = "查看";
+  else if (command === "create") label = "创建";
+  else if (command === "str_replace") label = "编辑";
+  else if (command === "undo_edit") label = "撤销";
+  else if (command === "insert") label = "插入";
+  else label = "文件";
 
   const pathDisplay = filePath ? shortPath(filePath) : "";
   const regexDisplay = regex ? ` /${regex}/` : "";
@@ -56,7 +56,7 @@ export default function FileEditRenderer({ toolName, args }: ToolRendererProps) 
             </div>
           ))}
           {truncated && (
-            <div className="text-[#444] mt-0.5">... {totalLines - DIFF_PREVIEW_LINES} more lines</div>
+            <div className="text-[#444] mt-0.5">… 还有 {totalLines - DIFF_PREVIEW_LINES} 行</div>
           )}
         </div>
       )}

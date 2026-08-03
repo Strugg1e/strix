@@ -10,12 +10,12 @@ interface TodoItem {
 }
 
 const ACTION_LABELS: Record<string, { label: string; Icon: typeof Circle }> = {
-  create_todo: { label: "Task added", Icon: Plus },
-  list_todos: { label: "Plan", Icon: CheckCheck },
-  update_todo: { label: "Task updated", Icon: Pencil },
-  mark_todo_done: { label: "Task completed", Icon: CircleCheckBig },
-  mark_todo_pending: { label: "Task reopened", Icon: RotateCcw },
-  delete_todo: { label: "Task removed", Icon: Trash2 },
+  create_todo: { label: "已添加任务", Icon: Plus },
+  list_todos: { label: "计划", Icon: CheckCheck },
+  update_todo: { label: "已更新任务", Icon: Pencil },
+  mark_todo_done: { label: "任务已完成", Icon: CircleCheckBig },
+  mark_todo_pending: { label: "任务已重新打开", Icon: RotateCcw },
+  delete_todo: { label: "任务已删除", Icon: Trash2 },
 };
 
 function StatusIcon({ status }: { status: string }) {
@@ -59,7 +59,7 @@ function TodoList({ todos, highlightId }: { todos: TodoItem[]; highlightId?: str
 }
 
 export default function TodoRenderer({ toolName, args, result }: ToolRendererProps) {
-  const action = ACTION_LABELS[toolName] ?? { label: "Plan", Icon: RefreshCw };
+  const action = ACTION_LABELS[toolName] ?? { label: "计划", Icon: RefreshCw };
   const ActionIcon = action.Icon;
   const res = result as Record<string, unknown> | string | null;
 

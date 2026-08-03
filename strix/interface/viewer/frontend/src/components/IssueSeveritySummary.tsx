@@ -13,23 +13,23 @@ export interface IssueSeveritySummaryFindings {
 interface IssueSeveritySummaryProps {
   findings: IssueSeveritySummaryFindings;
   className?: string;
-  /** Noun for the total count (e.g. "issues", "CVEs"). Defaults to "issues". */
+  /** 总数单位（例如“漏洞”“CVE”），默认为“漏洞”。 */
   unit?: string;
-  /** Optional content rendered at the end of the count row (e.g. a KEV badge). */
+  /** 可选的尾部内容（例如 KEV 徽章）。 */
   trailing?: React.ReactNode;
 }
 
 const SEVERITIES = [
-  { key: "critical", label: "critical", dotClass: "bg-red-500", textClass: "text-red-500" },
-  { key: "high", label: "high", dotClass: "bg-orange-500", textClass: "text-orange-500" },
-  { key: "medium", label: "medium", dotClass: "bg-yellow-500", textClass: "text-yellow-500" },
-  { key: "low", label: "low", dotClass: "bg-blue-500", textClass: "text-blue-500" },
+  { key: "critical", label: "严重", dotClass: "bg-red-500", textClass: "text-red-500" },
+  { key: "high", label: "高危", dotClass: "bg-orange-500", textClass: "text-orange-500" },
+  { key: "medium", label: "中危", dotClass: "bg-yellow-500", textClass: "text-yellow-500" },
+  { key: "low", label: "低危", dotClass: "bg-blue-500", textClass: "text-blue-500" },
 ] as const;
 
 export function IssueSeveritySummary({
   findings,
   className,
-  unit = "issues",
+  unit = "漏洞",
   trailing,
 }: IssueSeveritySummaryProps) {
   if (findings.total <= 0) return null;

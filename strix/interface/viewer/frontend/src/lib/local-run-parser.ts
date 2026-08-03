@@ -202,7 +202,7 @@ function parseOneVulnerability(
     ...emptyVulnerabilityDefaults(),
     id: asStringOrNull(raw.id) ?? `vuln-${index + 1}`,
     scan_id: runId,
-    title: asStringOrNull(raw.title) ?? "Untitled finding",
+    title: asStringOrNull(raw.title) ?? "未命名漏洞",
     description: asStringOrNull(raw.description) ?? "",
     severity: coerceSeverity(raw.severity),
     status,

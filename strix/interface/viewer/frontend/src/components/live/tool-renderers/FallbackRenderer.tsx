@@ -1,5 +1,6 @@
 import type { ToolRendererProps } from "@/types/events";
 import { CodeBlock } from "./ToolCard";
+import { toolLabel } from "@/lib/locale";
 
 /**
  * Generic renderer for tool names without a dedicated family renderer. Shows the
@@ -28,7 +29,7 @@ export default function FallbackRenderer({ toolName, args, result }: ToolRendere
   const resultText = pretty(result);
   return (
     <div>
-      <span className="text-[#888] font-semibold text-sm">{toolName.replace(/_/g, " ")}</span>
+      <span className="text-[#888] font-semibold text-sm">{toolLabel(toolName)}</span>
       {argsText && <CodeBlock className="text-[#777]">{argsText}</CodeBlock>}
       {resultText && <CodeBlock className="text-[#666]">{resultText}</CodeBlock>}
     </div>

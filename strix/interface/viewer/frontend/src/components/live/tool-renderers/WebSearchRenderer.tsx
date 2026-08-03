@@ -11,7 +11,7 @@ export default function WebSearchRenderer({ args, result }: ToolRendererProps) {
 
   return (
     <div>
-      <span className="text-amber-400/80 font-semibold text-sm">Searching the web</span>
+      <span className="text-amber-400/80 font-semibold text-sm">正在搜索网页</span>
       {query && <div className="text-[#888] text-[13px] mt-0.5">{query}</div>}
       {error && <div className="text-red-400/70 text-[13px] mt-1.5">{error}</div>}
       {content && (

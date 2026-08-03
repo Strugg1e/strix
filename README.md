@@ -150,6 +150,9 @@ Advanced multi-agent orchestration for comprehensive automated penetration testi
 Every scan writes its results to disk as it runs. Bring them up in a local dashboard with a single command:
 
 ```bash
+# Launch and manage scans from the local Chinese console
+strix console
+
 # Open the most recent run
 strix view
 
@@ -157,7 +160,9 @@ strix view
 strix view my-run-name
 ```
 
-`strix view` starts a lightweight local server (bound to `127.0.0.1` on a random port) and opens your browser to a private, tokened link. Nothing leaves your machine: the dashboard reads the run's files straight off disk, with no cloud account or upload required. The UI ships prebuilt with Strix, so there is no extra install and no JS build step.
+`strix console` adds a local Chinese launch form, reusable LLM profiles, per-run model overrides, connection tests, exact-target confirmation, live logs, stop/resume controls, and links into the existing result viewer. It accepts URL/domain targets and read-only local directory mounts, and runs one scan at a time. Profile metadata stays under `~/.strix`; API keys are stored separately in macOS Keychain and are never returned to the browser.
+
+Both commands start a lightweight local server bound to `127.0.0.1` and open a private, tokened link. Model credentials stay in the server process and are never sent to the browser. Nothing leaves your machine except the configured model requests and the traffic a scan sends to its confirmed target. The UI ships prebuilt with Strix, so there is no extra install and no JS build step.
 
 ### What's in the dashboard
 

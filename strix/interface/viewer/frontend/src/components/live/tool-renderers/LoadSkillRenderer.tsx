@@ -12,7 +12,7 @@ export default function LoadSkillRenderer({ args }: ToolRendererProps) {
 
   return (
     <div className="flex items-center gap-2">
-      <span className="text-emerald-400/80 font-semibold text-sm">Loading skill</span>
+      <span className="text-emerald-400/80 font-semibold text-sm">正在加载技能</span>
       {requestedSkills.length > 0 && (
         <span className="text-[#888] text-[13px]">{requestedSkills.join(", ")}</span>
       )}

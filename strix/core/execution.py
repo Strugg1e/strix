@@ -122,7 +122,7 @@ def _transient_model_retry_delay(attempt: int) -> float:
     return min(delay, _TRANSIENT_MODEL_RETRY_MAX_DELAY_S)
 
 
-async def run_agent_loop(
+async def run_agent_loop(  # noqa: PLR0912
     *,
     agent: Any,
     initial_input: Any,
@@ -186,6 +186,11 @@ async def run_agent_loop(
                 hooks=hooks,
             )
 
+    if interactive and context.get("terminate_when_completed"):
+        status = await _agent_status(coordinator, agent_id)
+        if status in {"completed", "stopped", "crashed", "failed"}:
+            return result
+
     if not interactive:
         return result
 
@@ -218,6 +223,10 @@ async def run_agent_loop(
                 event_sink=event_sink,
                 hooks=hooks,
             )
+        if context.get("terminate_when_completed"):
+            status = await _agent_status(coordinator, agent_id)
+            if status in {"completed", "stopped", "crashed", "failed"}:
+                return result
 
 
 async def spawn_child_agent(

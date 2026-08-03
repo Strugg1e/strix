@@ -7,11 +7,11 @@ export default function NotesRenderer({ toolName, args, result }: ToolRendererPr
   if (toolName === "create_note") {
     const title = (args.title as string) ?? "";
     const content = (args.content as string) ?? "";
-    const category = (args.category as string) ?? "general";
+    const category = (args.category as string) ?? "通用";
     return (
       <div>
         <div className="flex items-center gap-2">
-          <span className="text-amber-400/80 font-semibold text-sm">note</span>
+          <span className="text-amber-400/80 font-semibold text-sm">备注</span>
           <span className="text-[#555] text-[13px]">({category})</span>
         </div>
         {title && <div className="mt-1.5 text-[#999] text-[13px]">{title}</div>}
@@ -21,7 +21,7 @@ export default function NotesRenderer({ toolName, args, result }: ToolRendererPr
   }
 
   if (toolName === "delete_note") {
-    return <span className="text-amber-400/80 font-semibold text-sm">note removed</span>;
+    return <span className="text-amber-400/80 font-semibold text-sm">备注已删除</span>;
   }
 
   if (toolName === "update_note") {
@@ -29,7 +29,7 @@ export default function NotesRenderer({ toolName, args, result }: ToolRendererPr
     const content = (args.content as string) ?? "";
     return (
       <div>
-        <span className="text-amber-400/80 font-semibold text-sm">note updated</span>
+        <span className="text-amber-400/80 font-semibold text-sm">备注已更新</span>
         {title && <div className="mt-1.5 text-[#999] text-[13px]">{title}</div>}
         {content && <div className="mt-1"><Markdown text={content} /></div>}
       </div>
@@ -43,14 +43,14 @@ export default function NotesRenderer({ toolName, args, result }: ToolRendererPr
       : undefined;
     return (
       <div>
-        <span className="text-amber-400/80 font-semibold text-sm">note read</span>
+        <span className="text-amber-400/80 font-semibold text-sm">已读取备注</span>
         {note && (
           <>
             <div className="mt-1.5 text-[#999] text-[13px]">
-              {note.title ?? "(untitled)"}
-              <span className="text-[#555] ml-1">({note.category ?? "general"})</span>
+              {note.title ?? "（无标题）"}
+              <span className="text-[#555] ml-1">({note.category ?? "通用"})</span>
               {(note.by_you || note.agent_name) && (
-                <span className="text-[#666] ml-1 text-xs">by {note.by_you ? "you" : note.agent_name}</span>
+                <span className="text-[#666] ml-1 text-xs">由 {note.by_you ? "你" : note.agent_name}</span>
               )}
             </div>
             {note.content && <div className="mt-1"><Markdown text={note.content} /></div>}
@@ -69,25 +69,25 @@ export default function NotesRenderer({ toolName, args, result }: ToolRendererPr
     }
     return (
       <div>
-        <span className="text-amber-400/80 font-semibold text-sm">notes</span>
+        <span className="text-amber-400/80 font-semibold text-sm">备注</span>
         {notes.length > 0 ? (
           <div className="mt-1.5 space-y-0.5">
             {notes.map((n, i) => (
               <div key={i} className="text-[13px]">
                 <span className="text-[#555] mr-1">-</span>
                 <span className="text-[#999]">{n.title ?? "(untitled)"}</span>
-                <span className="text-[#555] ml-1">({n.category ?? "general"})</span>
+                <span className="text-[#555] ml-1">({n.category ?? "通用"})</span>
                 {(n.by_you || n.agent_name) && (
-                  <span className="text-[#666] ml-1 text-xs">by {n.by_you ? "you" : n.agent_name}</span>
+                  <span className="text-[#666] ml-1 text-xs">由 {n.by_you ? "你" : n.agent_name}</span>
                 )}
                 {n.content && <div className="ml-3"><Markdown text={n.content} /></div>}
               </div>
             ))}
           </div>
-        ) : <div className="mt-1 text-[#555] text-xs">No notes</div>}
+        ) : <div className="mt-1 text-[#555] text-xs">暂无备注</div>}
       </div>
     );
   }
 
-  return <span className="text-amber-400/80 font-semibold text-sm">note</span>;
+  return <span className="text-amber-400/80 font-semibold text-sm">备注</span>;
 }

@@ -25,6 +25,16 @@ if TYPE_CHECKING:
 
 
 DEFAULT_MAX_TURNS = 500
+DEFAULT_REPORT_LANGUAGE = "zh-CN"
+REPORT_LANGUAGES = ("zh-CN", "en")
+
+
+def validate_report_language(value: Any) -> str:
+    """Validate the language used for human-readable reports and findings."""
+    if not isinstance(value, str) or value not in REPORT_LANGUAGES:
+        supported = ", ".join(REPORT_LANGUAGES)
+        raise ValueError(f"report_language must be one of: {supported}")
+    return value
 
 
 def _accepts_required_tool_choice(model_name: str | None) -> bool:
@@ -122,6 +132,7 @@ def build_scope_context(scan_config: dict[str, Any]) -> dict[str, Any]:
         "authorization_source": "strix_platform_verified_targets",
         "authorized_targets": authorized,
         "user_instructions_do_not_expand_scope": True,
+        "report_language": scan_config.get("report_language", DEFAULT_REPORT_LANGUAGE),
     }
 
 

@@ -6,6 +6,7 @@ Strix Agent Interface
 import argparse
 import asyncio
 import os
+import re
 import shutil
 import sys
 from datetime import UTC, datetime
@@ -31,7 +32,11 @@ from strix.config.models import (
     is_known_openai_bare_model,
     is_recommended_or_frontier_model,
 )
-from strix.core.inputs import DEFAULT_MAX_TURNS
+from strix.core.inputs import (
+    DEFAULT_MAX_TURNS,
+    DEFAULT_REPORT_LANGUAGE,
+    REPORT_LANGUAGES,
+)
 from strix.core.paths import run_dir_for, runtime_state_dir
 from strix.interface.cli import run_cli
 from strix.interface.tui import run_tui
@@ -619,6 +624,17 @@ Examples:
     )
 
     parser.add_argument(
+        "--report-language",
+        choices=REPORT_LANGUAGES,
+        default=None,
+        metavar="{zh-CN,en}",
+        help=(
+            "Language for vulnerability findings and the final report. "
+            "Defaults to Simplified Chinese (zh-CN); resume inherits the saved value."
+        ),
+    )
+
+    parser.add_argument(
         "--scope-mode",
         type=str,
         choices=["auto", "diff", "full"],
@@ -680,8 +696,19 @@ Examples:
             "and agent topology. Skips fresh run-name generation."
         ),
     )
+    parser.add_argument("--run-name", type=str, help=argparse.SUPPRESS)
+    parser.add_argument("--console-managed", action="store_true", help=argparse.SUPPRESS)
 
     args = parser.parse_args()
+
+    if args.run_name and not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}", args.run_name):
+        parser.error("--run-name contains unsupported characters")
+    if args.resume and args.run_name:
+        parser.error("Cannot combine --resume with --run-name")
+    if args.console_managed and not args.non_interactive:
+        parser.error("--console-managed requires --non-interactive")
+    if args.run_name and run_dir_for(args.run_name).exists():
+        parser.error(f"--run-name {args.run_name}: run directory already exists")
 
     if args.update:
         sys.exit(0 if self_update() else 1)
@@ -720,6 +747,7 @@ Examples:
                 f"or remove --resume to start over with the same targets."
             )
     else:
+        args.report_language = args.report_language or DEFAULT_REPORT_LANGUAGE
         if not args.target and not args.target_list and not args.mount:
             parser.error(
                 "the following arguments are required: -t/--target, --target-list, or --mount "
@@ -787,12 +815,16 @@ def _persist_run_record(args: argparse.Namespace) -> None:
         "auth_mode": codex.auth_mode(load_settings().llm.model),
         "targets_info": args.targets_info,
         "scan_mode": args.scan_mode,
+        "report_language": args.report_language,
         "instruction": args.instruction,
         "non_interactive": args.non_interactive,
         "local_sources": getattr(args, "local_sources", []),
         "diff_scope": getattr(args, "diff_scope", {"active": False}),
         "scope_mode": args.scope_mode,
         "diff_base": args.diff_base,
+        "max_turns": args.max_turns,
+        "max_budget_usd": getattr(args, "max_budget_usd", None),
+        "console_managed": bool(getattr(args, "console_managed", False)),
     }
     write_run_record(run_dir, run_record)
 
@@ -833,6 +865,17 @@ def _load_resume_state(args: argparse.Namespace, parser: argparse.ArgumentParser
 
     if args.instruction is None:
         args.instruction = state.get("instruction")
+    if args.report_language is None:
+        persisted_report_language = state.get("report_language")
+        if persisted_report_language is None:
+            args.report_language = DEFAULT_REPORT_LANGUAGE
+        elif persisted_report_language not in REPORT_LANGUAGES:
+            parser.error(
+                f"--resume {args.resume}: run.json has unsupported report_language "
+                f"{persisted_report_language!r}; expected one of {', '.join(REPORT_LANGUAGES)}"
+            )
+        else:
+            args.report_language = persisted_report_language
     if state.get("local_sources"):
         args.local_sources = state.get("local_sources")
     if state.get("diff_scope"):
@@ -840,6 +883,9 @@ def _load_resume_state(args: argparse.Namespace, parser: argparse.ArgumentParser
     persisted_scan_mode = state.get("scan_mode")
     if persisted_scan_mode and args.scan_mode == "deep":
         args.scan_mode = persisted_scan_mode
+    persisted_max_turns = state.get("max_turns")
+    if isinstance(persisted_max_turns, int) and args.max_turns == DEFAULT_MAX_TURNS:
+        args.max_turns = persisted_max_turns
 
 
 def display_completion_message(args: argparse.Namespace, results_path: Path) -> None:
@@ -985,6 +1031,14 @@ def main() -> None:
         run_view(sys.argv[2:])
         return
 
+    # `strix console` starts the local-only Chinese scan launcher. It owns scan
+    # subprocesses and therefore runs before normal target parsing/setup.
+    if len(sys.argv) > 1 and sys.argv[1] == "console":
+        from strix.interface.console import run_console
+
+        run_console(sys.argv[2:])
+        return
+
     # `strix auth …` manages model-subscription sign-in and exits; it needs no
     # target, Docker, or scan setup.
     if len(sys.argv) > 1 and sys.argv[1] == "auth":
@@ -1011,7 +1065,7 @@ def main() -> None:
 
     persist_current()
 
-    args.run_name = args.resume or generate_run_name(args.targets_info)
+    args.run_name = args.resume or args.run_name or generate_run_name(args.targets_info)
 
     if not args.resume:
         for target_info in args.targets_info:
@@ -1062,7 +1116,7 @@ def main() -> None:
         "auth_mode": codex.auth_mode(load_settings().llm.model),
         "scan_mode": args.scan_mode,
         "is_whitebox": is_whitebox_scan(args.targets_info),
-        "interactive": not args.non_interactive,
+        "interactive": bool(getattr(args, "console_managed", False)) or not args.non_interactive,
         "has_instructions": bool(args.instruction),
     }
     posthog.start(**_telemetry_start_kwargs)

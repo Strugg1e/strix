@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import mimetypes
+import re
 import secrets
 import threading
 import webbrowser
@@ -63,10 +64,10 @@ def _iter_run_dirs(base_dir: Path) -> list[Path]:
     return run_dirs
 
 
-def run_list_entry(run_dir: Path) -> dict[str, Any]:
+def run_list_entry(run_dir: Path, *, console_manager: Any | None = None) -> dict[str, Any]:
     """Compact summary of a single run for the history list."""
     record = read_run_summary(run_dir)
-    return {
+    entry: dict[str, Any] = {
         "name": record.get("run_name") or run_dir.name,
         "target": primary_target(record),
         "scan_mode": record.get("scan_mode"),
@@ -76,9 +77,20 @@ def run_list_entry(run_dir: Path) -> dict[str, Any]:
         "finished": bool(record.get("finished")),
         "severity_counts": severity_counts(read_vulnerabilities(run_dir)),
     }
+    if console_manager is not None:
+        try:
+            console_manager.enrich_run_entry(entry, run_dir)
+        except Exception:  # noqa: BLE001 - history must remain readable
+            logger.debug("Unable to enrich console run %s", run_dir, exc_info=True)
+    return entry
 
 
-def build_runs_payload(base_dir: Path, *, verified: bool) -> dict[str, Any]:
+def build_runs_payload(
+    base_dir: Path,
+    *,
+    verified: bool,
+    console_manager: Any | None = None,
+) -> dict[str, Any]:
     """The /api/runs payload. Gates the run list behind email verification.
 
     The count is always advertised so the UI can tease the history, but the
@@ -88,10 +100,16 @@ def build_runs_payload(base_dir: Path, *, verified: bool) -> dict[str, Any]:
     count = len(run_dirs)
     if not verified:
         return {"locked": True, "count": count, "runs": []}
-    return {"locked": False, "count": count, "runs": [run_list_entry(d) for d in run_dirs]}
+    return {
+        "locked": False,
+        "count": count,
+        "runs": [run_list_entry(d, console_manager=console_manager) for d in run_dirs],
+    }
 
 
-def resolve_run_dir(base_dir: Path, run_param: str | None, default_run_dir: Path) -> Path | None:
+def resolve_run_dir(
+    base_dir: Path, run_param: str | None, default_run_dir: Path | None
+) -> Path | None:
     """Resolve a ``?run=`` value to a real run directory under ``base_dir``.
 
     Returns ``default_run_dir`` when no run is requested. Rejects traversal and
@@ -117,19 +135,22 @@ SESSION_COOKIE_PREFIX = "strix_viewer_session"
 class _ViewerState:
     def __init__(
         self,
-        run_dir: Path,
+        run_dir: Path | None,
         assets_dir: Path,
-        steer_handler: Callable[[str, str], bool] | None = None,
+        steer_handler: Callable[..., bool] | None = None,
+        base_dir: Path | None = None,
+        console_manager: Any | None = None,
     ) -> None:
         self.run_dir = run_dir
         self.assets_dir = assets_dir
         # The strix_runs directory that holds the launched run; used to
         # enumerate and resolve other runs for the history list.
-        self.base_dir = run_dir.parent
+        self.base_dir = base_dir or (run_dir.parent if run_dir else Path.cwd() / "strix_runs")
         # Set only when the viewer runs inside a live scan process (the TUI
         # launcher), which can deliver a message to a running agent. Absent for
         # standalone ``strix view`` / finished runs, so steering is unavailable.
         self.steer_handler = steer_handler
+        self.console_manager = console_manager
         # Unguessable per-process capability. It is minted here, printed/opened
         # for the operator who started the server (see ``authorized_url``), and
         # exchanged for a session cookie only when presented on the initial page
@@ -167,7 +188,7 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
                 logger.exception("viewer request failed: %s", path)
                 self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "internal error"})
 
-        def do_POST(self) -> None:
+        def do_POST(self) -> None:  # noqa: PLR0912
             path = urlsplit(self.path).path
             try:
                 if path == "/api/event":
@@ -184,6 +205,18 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
                     self._handle_feedback()
                 elif path == "/api/agents/steer":
                     self._handle_steer()
+                elif path == "/api/console/jobs":
+                    self._handle_console_start()
+                elif path.startswith("/api/console/jobs/") and path.endswith("/stop"):
+                    self._handle_console_stop(path)
+                elif path.startswith("/api/console/runs/") and path.endswith("/resume"):
+                    self._handle_console_resume(path)
+                elif path == "/api/console/projects":
+                    self._handle_console_project_save()
+                elif path == "/api/console/profiles":
+                    self._handle_console_profile_save()
+                elif path.startswith("/api/console/profiles/") and path.endswith("/test"):
+                    self._handle_console_profile_test(path)
                 else:
                     self._send_json(HTTPStatus.NOT_FOUND, {"error": "unknown endpoint"})
             except BrokenPipeError:
@@ -191,6 +224,21 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
             except Exception:
                 # A bad request must never kill the worker thread.
                 logger.exception("viewer request failed: POST %s", path)
+                self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "internal error"})
+
+        def do_DELETE(self) -> None:
+            path = urlsplit(self.path).path
+            try:
+                if path.startswith("/api/console/projects/"):
+                    self._handle_console_project_delete(path)
+                elif path.startswith("/api/console/profiles/"):
+                    self._handle_console_profile_delete(path)
+                else:
+                    self._send_json(HTTPStatus.NOT_FOUND, {"error": "unknown endpoint"})
+            except BrokenPipeError:
+                logger.debug("viewer client disconnected during DELETE %s", path)
+            except Exception:
+                logger.exception("viewer request failed: DELETE %s", path)
                 self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "internal error"})
 
         def _read_body(self) -> dict[str, Any]:
@@ -233,7 +281,12 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
             self.send_response(HTTPStatus.NO_CONTENT)
             self.end_headers()
 
-        def _handle_api(self, path: str, query: dict[str, list[str]]) -> None:
+        def _handle_api(  # noqa: PLR0911, PLR0912
+            self, path: str, query: dict[str, list[str]]
+        ) -> None:
+            if path.startswith("/api/console/"):
+                self._handle_console_get(path, query)
+                return
             # The launched run is always viewable with no verification. The
             # cross-run history list (/api/runs) unlocks its entries only for a
             # caller that holds this process's session capability *and* is email
@@ -247,7 +300,13 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
             if path == "/api/capabilities":
                 # Steering is only possible when the viewer shares a live scan's
                 # coordinator + event loop (the TUI launcher wires a handler).
-                self._send_json(HTTPStatus.OK, {"can_steer": state.steer_handler is not None})
+                self._send_json(
+                    HTTPStatus.OK,
+                    {
+                        "can_steer": state.steer_handler is not None,
+                        "can_launch": state.console_manager is not None,
+                    },
+                )
                 return
             if path == "/api/auth/status":
                 self._handle_auth_status()
@@ -265,11 +324,11 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
             # (so merely reaching an exposed --host port is not enough) *and*
             # email verification -- otherwise knowing a run name would leak its
             # metadata, vulnerabilities, report, and transcript.
-            if run_dir.resolve() != state.run_dir.resolve():
+            if state.run_dir is None or run_dir.resolve() != state.run_dir.resolve():
                 if not self._has_session():
                     self._send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
                     return
-                if not auth.is_verified():
+                if state.console_manager is None and not auth.is_verified():
                     self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "unverified"})
                     return
 
@@ -283,6 +342,163 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
                 self._send_json(HTTPStatus.OK, build_run_state(run_dir))
             else:
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "unknown endpoint"})
+
+        def _handle_console_get(  # noqa: PLR0911
+            self, path: str, query: dict[str, list[str]]
+        ) -> None:
+            manager = state.console_manager
+            if manager is None:
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "console unavailable"})
+                return
+            if not self._has_session():
+                self._send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+                return
+            if path == "/api/console/status":
+                self._send_json(HTTPStatus.OK, manager.status_payload())
+                return
+            if path == "/api/console/runs":
+                payload = build_runs_payload(
+                    state.base_dir,
+                    verified=True,
+                    console_manager=manager,
+                )
+                self._send_json(HTTPStatus.OK, payload)
+                return
+            match = re.fullmatch(r"/api/console/runs/([^/]+)/snapshot", path)
+            if match:
+                try:
+                    self._send_json(
+                        HTTPStatus.OK,
+                        manager.run_snapshot(unquote(match.group(1))),
+                    )
+                except ValueError as exc:
+                    self._send_console_error(exc)
+                return
+            if path == "/api/console/profiles":
+                self._send_json(
+                    HTTPStatus.OK,
+                    {"profiles": manager.profile_store.list_profiles()},
+                )
+                return
+            if path == "/api/console/projects":
+                self._send_json(
+                    HTTPStatus.OK,
+                    {"projects": manager.project_store.list_projects()},
+                )
+                return
+            match = re.fullmatch(r"/api/console/jobs/([^/]+)/log", path)
+            if match:
+                raw_after = (query.get("after") or ["0"])[0]
+                try:
+                    after = int(raw_after)
+                except ValueError:
+                    after = 0
+                try:
+                    self._send_json(HTTPStatus.OK, manager.read_log(match.group(1), after))
+                except ValueError as exc:
+                    self._send_console_error(exc)
+                return
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": "unknown endpoint"})
+
+        def _handle_console_start(self) -> None:
+            manager = self._require_console()
+            if manager is None:
+                return
+            try:
+                self._send_json(HTTPStatus.CREATED, manager.start(self._read_body()))
+            except ValueError as exc:
+                self._send_console_error(exc)
+
+        def _handle_console_stop(self, path: str) -> None:
+            manager = self._require_console()
+            if manager is None:
+                return
+            job_id = path.removeprefix("/api/console/jobs/").removesuffix("/stop").strip("/")
+            try:
+                self._send_json(HTTPStatus.OK, manager.stop(job_id))
+            except ValueError as exc:
+                self._send_console_error(exc)
+
+        def _handle_console_resume(self, path: str) -> None:
+            manager = self._require_console()
+            if manager is None:
+                return
+            run_name = path.removeprefix("/api/console/runs/").removesuffix("/resume").strip("/")
+            try:
+                self._send_json(
+                    HTTPStatus.CREATED,
+                    manager.resume(run_name, self._read_body()),
+                )
+            except ValueError as exc:
+                self._send_console_error(exc)
+
+        def _handle_console_project_save(self) -> None:
+            manager = self._require_console()
+            if manager is None:
+                return
+            try:
+                project = manager.project_store.save(self._read_body())
+                self._send_json(HTTPStatus.OK, project)
+            except ValueError as exc:
+                self._send_console_error(exc)
+
+        def _handle_console_project_delete(self, path: str) -> None:
+            manager = self._require_console()
+            if manager is None:
+                return
+            project_id = path.removeprefix("/api/console/projects/").strip("/")
+            try:
+                manager.project_store.delete(project_id)
+                self._send_json(HTTPStatus.OK, {"ok": True})
+            except ValueError as exc:
+                self._send_console_error(exc)
+
+        def _handle_console_profile_save(self) -> None:
+            manager = self._require_console()
+            if manager is None:
+                return
+            try:
+                profile = manager.profile_store.save(self._read_body())
+                self._send_json(HTTPStatus.OK, profile)
+            except ValueError as exc:
+                self._send_console_error(exc)
+
+        def _handle_console_profile_test(self, path: str) -> None:
+            manager = self._require_console()
+            if manager is None:
+                return
+            profile_id = (
+                path.removeprefix("/api/console/profiles/").removesuffix("/test").strip("/")
+            )
+            try:
+                result = manager.profile_store.test(profile_id)
+                self._send_json(HTTPStatus.OK, result)
+            except ValueError as exc:
+                self._send_console_error(exc)
+
+        def _handle_console_profile_delete(self, path: str) -> None:
+            manager = self._require_console()
+            if manager is None:
+                return
+            profile_id = path.removeprefix("/api/console/profiles/").strip("/")
+            try:
+                manager.profile_store.delete(profile_id)
+                self._send_json(HTTPStatus.OK, {"ok": True})
+            except ValueError as exc:
+                self._send_console_error(exc)
+
+        def _require_console(self) -> Any | None:
+            if state.console_manager is None:
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "console unavailable"})
+                return None
+            if not self._has_session():
+                self._send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+                return None
+            return state.console_manager
+
+        def _send_console_error(self, exc: ValueError) -> None:
+            status = getattr(exc, "status", HTTPStatus.BAD_REQUEST)
+            self._send_json(status, {"error": str(exc)})
 
         def _handle_auth_status(self) -> None:
             # The cached verified email is only disclosed to a caller holding this
@@ -432,6 +648,7 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
             body = self._read_body()
             agent_id = body.get("agent_id")
             message = body.get("message")
+            run_name = body.get("run_name")
             if not isinstance(agent_id, str) or not agent_id.strip():
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_agent_id"})
                 return
@@ -442,11 +659,35 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
             ):
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_message"})
                 return
+            if run_name is not None and (
+                not isinstance(run_name, str)
+                or not re.fullmatch(
+                    r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}", run_name
+                )
+            ):
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_run_name"})
+                return
             if state.steer_handler is None:
                 # Standalone / finished-run viewing has no live scan to steer.
                 self._send_json(HTTPStatus.FORBIDDEN, {"error": "steering_unavailable"})
                 return
-            delivered = state.steer_handler(agent_id, message)
+            # RunManager accepts the optional run context.  The in-TUI viewer
+            # still exposes the legacy two-argument callback, so only omit the
+            # third argument when the client omitted ``run_name`` as well.
+            if run_name is not None:
+                try:
+                    delivered = state.steer_handler(agent_id, message, run_name)
+                except TypeError:
+                    # Legacy in-TUI callbacks are already bound to one run.
+                    # A console manager must reject a callback that cannot
+                    # consume the explicit context; the old viewer can safely
+                    # fall back to its two-argument handler.
+                    delivered = (
+                        state.console_manager is None
+                        and state.steer_handler(agent_id, message)
+                    )
+            else:
+                delivered = state.steer_handler(agent_id, message)
             if delivered:
                 self._send_json(HTTPStatus.OK, {"ok": True})
             else:
@@ -546,7 +787,9 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
     return ViewerHandler
 
 
-def authorized_url(base_url: str, token: str) -> str:
+def authorized_url(
+    base_url: str, token: str, *, extra_query: dict[str, str] | None = None
+) -> str:
     """URL that bootstraps the viewer session for the operator.
 
     Presenting ``token`` on the initial page load is what mints the session
@@ -554,16 +797,19 @@ def authorized_url(base_url: str, token: str) -> str:
     the server. Sharing it (rather than the bare ``base_url``) is what lets a
     trusted remote user authorize when the viewer is exposed with ``--host``.
     """
-    return f"{base_url}/?{urlencode({'token': token})}"
+    query = {"token": token, **(extra_query or {})}
+    return f"{base_url}/?{urlencode(query)}"
 
 
 def serve(
-    run_dir: Path,
+    run_dir: Path | None,
     *,
     host: str = "127.0.0.1",
     port: int = 0,
     open_browser: bool = True,
-    steer_handler: Callable[[str, str], bool] | None = None,
+    steer_handler: Callable[..., bool] | None = None,
+    base_dir: Path | None = None,
+    console_manager: Any | None = None,
 ) -> tuple[ThreadingHTTPServer, str, str]:
     """Start the viewer server on a background thread; return (server, url, token).
 
@@ -579,7 +825,13 @@ def serve(
     ``None`` (standalone ``strix view``), steering is reported unavailable.
     """
     assets_dir = bundle_dir()
-    state = _ViewerState(run_dir=run_dir, assets_dir=assets_dir, steer_handler=steer_handler)
+    state = _ViewerState(
+        run_dir=run_dir,
+        assets_dir=assets_dir,
+        steer_handler=steer_handler,
+        base_dir=base_dir,
+        console_manager=console_manager,
+    )
     handler = _make_handler(state)
 
     try:
@@ -611,4 +863,7 @@ def _open_browser(url: str) -> None:
         logger.debug("could not open browser for %s", url, exc_info=True)
 
 
-__all__ = ["authorized_url", "bundle_dir", "bundle_is_built", "serve"]
+open_browser = _open_browser
+
+
+__all__ = ["authorized_url", "bundle_dir", "bundle_is_built", "open_browser", "serve"]

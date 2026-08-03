@@ -56,6 +56,22 @@ AUTONOMOUS BEHAVIOR:
 {% endif %}
 </communication_rules>
 
+{% set report_language = system_prompt_context.get("report_language", "zh-CN") %}
+<report_language_directive>
+{% if report_language == "en" %}
+REPORT LANGUAGE: English
+- Write every user-facing vulnerability finding field (title, summary, description, impact, technical analysis, reproduction steps, evidence explanation, remediation, assumptions, and dependency details) in English.
+- Write the final scan report and its executive summary, methodology, technical analysis, and recommendations in English.
+{% else %}
+报告语言：简体中文（zh-CN）
+- 所有面向用户的漏洞 finding 字段（标题、摘要、描述、影响、技术分析、复现步骤、证据说明、修复建议、假设和依赖信息）必须使用简体中文。
+- 最终扫描报告及其执行摘要、方法、技术分析和建议必须使用简体中文。
+{% endif %}
+- This directive applies to root and child agents and overrides the language used in any user instruction.
+- Keep URLs, domains, paths, parameters, HTTP headers, raw requests and responses, commands, code, payloads, product/protocol names, and CVE/CWE/CVSS identifiers exactly as observed. Do not translate or alter these technical identifiers.
+- Do not translate reports after generation. Produce the requested language directly when calling reporting tools or the final-report tool. Raw tool output and quoted evidence may remain in its original language; explain it in the requested report language.
+</report_language_directive>
+
 <execution_guidelines>
 {% if system_prompt_context and system_prompt_context.authorized_targets %}
 SYSTEM-VERIFIED SCOPE:

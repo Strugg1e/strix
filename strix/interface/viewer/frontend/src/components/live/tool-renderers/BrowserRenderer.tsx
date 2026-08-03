@@ -4,25 +4,25 @@ import type { ToolRendererProps } from "@/types/events";
 import { SyntaxBlock } from "./ToolCard";
 
 const SIMPLE_ACTIONS: Record<string, string> = {
-  back: "going back in browser history",
-  forward: "going forward in browser history",
-  scroll_down: "scrolling down",
-  scroll_up: "scrolling up",
-  refresh: "refreshing",
-  close_tab: "closing tab",
-  switch_tab: "switching tab",
-  list_tabs: "listing tabs",
-  view_source: "viewing page source",
-  get_console_logs: "getting console logs",
-  screenshot: "taking screenshot",
-  wait: "waiting...",
-  close: "closing",
+  back: "返回浏览器历史记录",
+  forward: "前进浏览器历史记录",
+  scroll_down: "向下滚动",
+  scroll_up: "向上滚动",
+  refresh: "刷新",
+  close_tab: "关闭标签页",
+  switch_tab: "切换标签页",
+  list_tabs: "列出标签页",
+  view_source: "查看页面源代码",
+  get_console_logs: "获取控制台日志",
+  screenshot: "截图",
+  wait: "等待中…",
+  close: "关闭",
 };
 
 const CLICK_ACTIONS: Record<string, string> = {
-  click: "clicking",
-  double_click: "double clicking",
-  hover: "hovering",
+  click: "点击",
+  double_click: "双击",
+  hover: "悬停",
 };
 
 function UrlLabel({ prefix, url, suffix }: { prefix: string; url?: string; suffix?: string }) {
@@ -53,14 +53,14 @@ function describeAction(args: Record<string, unknown>): React.ReactNode {
 
   // URL actions: launch, goto, new_tab
   if (action === "launch") {
-    if (!url) return "launching";
-    return <UrlLabel prefix="launching " url={url} />;
+    if (!url) return "启动浏览器";
+    return <UrlLabel prefix="打开 " url={url} />;
   }
   if (action === "goto" || action === "navigate") {
-    return <UrlLabel prefix="navigating to " url={url} />;
+    return <UrlLabel prefix="导航至 " url={url} />;
   }
   if (action === "new_tab") {
-    return <UrlLabel prefix="opening tab " url={url} />;
+    return <UrlLabel prefix="打开标签页 " url={url} />;
   }
 
   // Click actions
@@ -69,24 +69,24 @@ function describeAction(args: Record<string, unknown>): React.ReactNode {
   // Type
   if (action === "type") {
     const text = ((args.text as string) ?? "").slice(0, 40);
-    return `typing "${text}"`;
+    return `输入“${text}”`;
   }
 
   // Key press
   if (action === "press_key" || action === "key_press") {
-    return `pressing key ${(args.key as string) ?? ""}`;
+    return `按键 ${(args.key as string) ?? ""}`;
   }
 
   // Save PDF
   if (action === "save_pdf" || action === "save_as_pdf") {
     const path = (args.file_path as string) ?? "";
-    return `saving PDF${path ? ` to ${path}` : ""}`;
+    return `保存 PDF${path ? ` 至 ${path}` : ""}`;
   }
 
   // Execute JS — description only, code shown separately
-  if (action === "execute_js") return "executing javascript";
+  if (action === "execute_js") return "执行 JavaScript";
 
-  return action || "browser action";
+  return action || "浏览器操作";
 }
 
 export default function BrowserRenderer({ args }: ToolRendererProps) {
@@ -99,7 +99,7 @@ export default function BrowserRenderer({ args }: ToolRendererProps) {
   return (
     <div>
       <div className="flex items-center gap-2 min-w-0">
-        <span className="text-blue-400/80 font-semibold text-sm shrink-0">Browser</span>
+        <span className="text-blue-400/80 font-semibold text-sm shrink-0">浏览器</span>
         <span className="min-w-0 truncate text-[#888] text-[13px]">
           {typeof description === "string" ? description : description}
         </span>

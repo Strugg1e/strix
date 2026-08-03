@@ -15,7 +15,7 @@ export default function ChatBubble({ role, content }: ChatBubbleProps) {
   return (
     <div>
       <span className={`font-semibold text-sm ${isUser ? "text-blue-400/80" : "text-purple-400/80"}`}>
-        {isUser ? "User" : "Thinking"}
+        {isUser ? "用户" : "思考中"}
       </span>
       <div className="mt-1.5 italic text-[#888]">
         <TruncatedText text={content} maxLines={MAX_LINES} />

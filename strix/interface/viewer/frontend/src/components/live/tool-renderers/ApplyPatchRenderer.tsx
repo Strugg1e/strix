@@ -11,7 +11,7 @@ const ADD_FILE = "*** Add File: ";
 const UPDATE_FILE = "*** Update File: ";
 const DELETE_FILE = "*** Delete File: ";
 
-const OP_LABEL: Record<string, string> = { add: "create", update: "edit", delete: "delete" };
+const OP_LABEL: Record<string, string> = { add: "创建", update: "编辑", delete: "删除" };
 
 interface PatchOp {
   kind: "add" | "update" | "delete";
@@ -66,7 +66,7 @@ function parsePatchOperations(patchText: string): PatchOp[] {
 }
 
 function Operation({ op }: { op: PatchOp }) {
-  const label = OP_LABEL[op.kind] ?? "file";
+  const label = OP_LABEL[op.kind] ?? "文件";
   const total = op.oldLines.length + op.newLines.length;
   const truncated = total > DIFF_PREVIEW_LINES;
   const oldBudget = truncated && total > 0 ? Math.round(DIFF_PREVIEW_LINES * (op.oldLines.length / total)) : op.oldLines.length;
@@ -90,7 +90,7 @@ function Operation({ op }: { op: PatchOp }) {
               <span className="select-none text-emerald-400/30 mr-1">+</span>{line}
             </div>
           ))}
-          {truncated && <div className="text-[#444] mt-0.5">... {total - DIFF_PREVIEW_LINES} more lines</div>}
+          {truncated && <div className="text-[#444] mt-0.5">… 还有 {total - DIFF_PREVIEW_LINES} 行</div>}
         </div>
       )}
     </div>
@@ -103,7 +103,7 @@ export default function ApplyPatchRenderer({ args, result, status }: ToolRendere
   if (ops.length === 0) {
     return (
       <div>
-        <span className="text-sky-400/80 font-semibold text-sm">patch</span>
+        <span className="text-sky-400/80 font-semibold text-sm">补丁</span>
         {status === "failed" && typeof result === "string" && result.trim() && (
           <div className="text-red-400/70 text-[13px] mt-1">{result.trim()}</div>
         )}

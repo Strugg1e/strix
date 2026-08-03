@@ -6,7 +6,7 @@ export function formatStrixId(num: number): string {
   return `STRIX-${num}`;
 }
 
-/** Format an integer with locale thousands separators (e.g. 68339486 -> "68,339,486"). */
+/** 使用中文 locale 格式化整数（例如 68339486 -> "68,339,486"）。 */
 export function formatNumber(num: number): string {
-  return new Intl.NumberFormat("en-US").format(num);
+  return new Intl.NumberFormat("zh-CN").format(num);
 }

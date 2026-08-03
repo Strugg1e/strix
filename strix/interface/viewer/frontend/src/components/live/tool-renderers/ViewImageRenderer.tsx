@@ -21,7 +21,7 @@ export default function ViewImageRenderer({ args, result }: ToolRendererProps) {
   return (
     <div>
       <div className="flex items-baseline gap-2">
-        <span className="text-sky-400/80 font-semibold text-sm shrink-0">view image</span>
+        <span className="text-sky-400/80 font-semibold text-sm shrink-0">查看图片</span>
         {path && <span className="text-[#888] font-mono text-[13px] break-all">{shortPath(path)}</span>}
       </div>
       {error && <div className="text-red-400/70 text-[13px] mt-1">{error}</div>}

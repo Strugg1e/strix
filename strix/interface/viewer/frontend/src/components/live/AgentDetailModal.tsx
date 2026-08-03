@@ -33,12 +33,14 @@ const NEAR_BOTTOM_PX = 80;
 export function AgentDetailModal({
   open,
   agent,
+  runName,
   events,
   steerable,
   onClose,
 }: {
   open: boolean;
   agent: TranscriptAgent | null;
+  runName?: string | null;
   events: TranscriptEvent[];
   steerable: boolean;
   onClose: () => void;
@@ -120,7 +122,7 @@ export function AgentDetailModal({
       onClick={onClose}
       role="dialog"
       aria-modal="true"
-      aria-label={`Agent ${shownAgent.name}`}
+      aria-label={`Agent ${shownAgent.name} 的活动记录`}
     >
       <div
         className="relative flex h-[60vh] w-[calc(100vw-4rem)] max-w-6xl flex-col overflow-hidden rounded-xl border border-[#222] bg-[#0a0a0a] shadow-2xl"
@@ -137,7 +139,7 @@ export function AgentDetailModal({
           <button
             type="button"
             onClick={onClose}
-            aria-label="Close"
+            aria-label="关闭"
             className="flex-shrink-0 rounded-md p-1 text-[#888] transition-colors hover:bg-[#1a1a1a] hover:text-white"
           >
             <X className="h-4 w-4" />
@@ -155,6 +157,7 @@ export function AgentDetailModal({
             <ScanPromptComposer
               agents={[shownAgent]}
               fixedAgentId={shownAgent.id}
+              runName={runName}
               className="mt-0"
             />
           </div>

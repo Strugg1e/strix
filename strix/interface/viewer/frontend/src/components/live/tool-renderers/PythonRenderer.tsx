@@ -49,9 +49,9 @@ export default function PythonRenderer({ args, result }: ToolRendererProps) {
   else if (typeof res === "string") stdout = res;
 
   const subtitle =
-    action === "new_session" ? "new session" :
-    action === "close" ? "close session" :
-    action === "list_sessions" ? "list sessions" : null;
+    action === "new_session" ? "新建会话" :
+    action === "close" ? "关闭会话" :
+    action === "list_sessions" ? "会话列表" : null;
 
   const output = stdout ? formatOutput(cleanOutput(stdout)) : null;
 

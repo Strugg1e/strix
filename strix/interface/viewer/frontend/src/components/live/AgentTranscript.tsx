@@ -4,6 +4,7 @@ import { getToolRenderer, getToolIcon } from "./tool-renderers";
 import ChatBubble from "./tool-renderers/ChatBubble";
 import type { ToolRendererProps, AgentNode as GraphAgentNode } from "@/types/events";
 import type { TranscriptAgent, TranscriptEvent } from "@/data/serverSource";
+import { statusLabel, toolLabel } from "@/lib/locale";
 
 /* ---------- Error boundary so one bad event never blanks the transcript ---------- */
 class RendererErrorBoundary extends Component<
@@ -21,7 +22,7 @@ class RendererErrorBoundary extends Component<
     if (this.state.hasError) {
       return (
         <span className="text-[#555] font-semibold text-sm">
-          {this.props.toolName.replace(/_/g, " ")}
+          {toolLabel(this.props.toolName)}
         </span>
       );
     }
@@ -224,19 +225,18 @@ export function AgentTranscript({
                 STATUS_STYLE[agent.status] ?? "text-[#aaa] border-[#333] bg-[#1a1a1a]"
               }`}
             >
-              {agent.status}
+              {statusLabel(agent.status)}
             </span>
             <span className="font-mono text-xs text-[#555]">{agent.id}</span>
           </div>
           <p className="text-xs text-[#666] mb-4">
-            {msgCount} message{msgCount === 1 ? "" : "s"} · {toolCount} tool call
-            {toolCount === 1 ? "" : "s"}
+            {msgCount} 条消息 · {toolCount} 次工具调用
           </p>
         </>
       )}
 
       {mine.length === 0 ? (
-        <p className="text-sm text-[#666]">No recorded activity for this agent.</p>
+        <p className="text-sm text-[#666]">该 Agent 暂无活动记录。</p>
       ) : (
         <div className="py-1">
           {mine.map((event, i) => {

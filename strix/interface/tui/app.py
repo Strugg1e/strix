@@ -842,6 +842,7 @@ class StrixTUIApp(App):  # type: ignore[misc]
             "run_name": args.run_name,
             "diff_scope": getattr(args, "diff_scope", {"active": False}),
             "scan_mode": getattr(args, "scan_mode", "deep"),
+            "report_language": getattr(args, "report_language", "zh-CN"),
             "non_interactive": bool(getattr(args, "non_interactive", False)),
             "local_sources": getattr(args, "local_sources", None) or [],
             "scope_mode": getattr(args, "scope_mode", "auto"),

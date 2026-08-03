@@ -5,6 +5,7 @@ import { TruncatedText } from "./ToolCard";
 import { MdCodeBlock } from "@/components/vulnerability/MdCodeBlock";
 import { parseFencedCode } from "@/lib/fenced-code";
 import Markdown from "./Markdown";
+import { severityLabel } from "@/lib/locale";
 
 const SEVERITY_COLORS: Record<string, string> = {
   critical: "text-red-400", high: "text-orange-400", medium: "text-yellow-400",
@@ -34,7 +35,7 @@ export default function VulnReportRenderer({ args, result }: ToolRendererProps) 
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-2 flex-wrap">
-        <span className={`font-semibold text-sm ${sevColor}`}>{severity.toUpperCase()}</span>
+        <span className={`font-semibold text-sm ${sevColor}`}>{severityLabel(severity)}</span>
         {cvss != null && <span className="text-[#888] text-[13px]">CVSS {cvss}</span>}
         {cve && <span className="text-[#888] font-mono text-[13px]">{cve}</span>}
         {cwe && <span className="text-[#888] font-mono text-[13px]">{cwe}</span>}
@@ -46,26 +47,26 @@ export default function VulnReportRenderer({ args, result }: ToolRendererProps) 
       {description && <TruncatedText text={description} maxLines={20} />}
       {impact && (
         <div>
-          <span className="text-emerald-400/60 text-sm font-semibold">Impact</span>
+          <span className="text-emerald-400/60 text-sm font-semibold">影响</span>
           <div className="mt-1"><TruncatedText text={impact} maxLines={15} /></div>
         </div>
       )}
       {technicalAnalysis && (
         <div>
-          <span className="text-emerald-400/60 text-sm font-semibold">Technical Analysis</span>
+          <span className="text-emerald-400/60 text-sm font-semibold">技术分析</span>
           <div className="mt-1"><TruncatedText text={technicalAnalysis} maxLines={20} /></div>
         </div>
       )}
       {(pocDescription || pocCode) && (
         <div>
-          <span className="text-emerald-400/60 text-sm font-semibold">Proof of Concept</span>
+          <span className="text-emerald-400/60 text-sm font-semibold">概念验证</span>
           {pocDescription && <div className="mt-1"><Markdown text={pocDescription} /></div>}
           {pocCode && <MdCodeBlock className={pocLang ? `language-${pocLang}` : undefined}>{pocCode}</MdCodeBlock>}
         </div>
       )}
       {remediation && (
         <div>
-          <span className="text-emerald-400/60 text-sm font-semibold">Remediation</span>
+          <span className="text-emerald-400/60 text-sm font-semibold">修复方案</span>
           <div className="mt-1"><TruncatedText text={remediation} maxLines={15} /></div>
         </div>
       )}

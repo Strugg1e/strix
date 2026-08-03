@@ -119,12 +119,12 @@ export default function TerminalRenderer({ toolName, args, result }: ToolRendere
 
   return (
     <div>
-      <span className="text-emerald-400/80 font-semibold text-sm">{isStdin ? "Terminal input" : "Terminal"}</span>
+      <span className="text-emerald-400/80 font-semibold text-sm">{isStdin ? "终端输入" : "终端"}</span>
       {command && <SyntaxBlock code={command} language="bash" collapsible />}
       {error && <CodeBlock className="text-red-400/70">{error}</CodeBlock>}
       {output && <CodeBlock className="text-[#666]">{output}</CodeBlock>}
       {exitCode != null && exitCode !== 0 && (
-        <div className="font-mono text-[13px] text-red-400/70 mt-0.5">exit code {exitCode}</div>
+        <div className="font-mono text-[13px] text-red-400/70 mt-0.5">退出码 {exitCode}</div>
       )}
     </div>
   );

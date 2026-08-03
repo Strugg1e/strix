@@ -128,6 +128,10 @@ export interface RunListEntry {
   end_time: string | null;
   finished: boolean;
   severity_counts: RunSeverityCounts;
+  project_id?: string;
+  project_name?: string;
+  managed?: boolean;
+  report_available?: boolean;
 }
 
 export interface RunsPayload {
@@ -191,10 +195,15 @@ export async function fetchCapabilities(): Promise<Capabilities> {
 }
 
 /** POST /api/agents/steer. Sends a steering instruction to a running agent. */
-export async function steerAgent(agentId: string, message: string): Promise<SteerResult> {
+export async function steerAgent(
+  agentId: string,
+  message: string,
+  runName?: string | null
+): Promise<SteerResult> {
   const { ok, data } = await postJson("/api/agents/steer", {
     agent_id: agentId,
     message,
+    ...(runName ? { run_name: runName } : {}),
   });
   if (ok && data.ok === true) return { ok: true };
   return { ok: false, error: String(data.error ?? "unavailable") };

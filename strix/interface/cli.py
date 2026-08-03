@@ -1,10 +1,13 @@
+import asyncio
 import atexit
 import contextlib
+import json
 import logging
 import signal
 import sys
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 from rich.console import Console
@@ -13,7 +16,9 @@ from rich.panel import Panel
 from rich.text import Text
 
 from strix.config import load_settings
+from strix.core.agents import AgentCoordinator
 from strix.core.inputs import DEFAULT_MAX_TURNS
+from strix.core.paths import run_dir_for, runtime_state_dir
 from strix.core.runner import run_strix_scan
 from strix.report.state import ReportState, set_global_report_state
 from strix.runtime import session_manager
@@ -25,6 +30,49 @@ from .utils import (
 
 
 logger = logging.getLogger(__name__)
+
+
+async def _watch_console_commands(
+    coordinator: AgentCoordinator,
+    command_path: Path,
+) -> None:
+    """Deliver local-console JSONL commands into live SDK sessions."""
+    try:
+        offset = command_path.stat().st_size
+    except OSError:
+        offset = 0
+    pending = b""
+    while True:
+        await asyncio.sleep(0.25)
+        try:
+            with command_path.open("rb") as handle:
+                handle.seek(offset)
+                chunk = handle.read()
+        except OSError:
+            continue
+        if not chunk:
+            continue
+        offset += len(chunk)
+        lines = (pending + chunk).split(b"\n")
+        pending = lines.pop()
+        for raw in lines:
+            if not raw.strip():
+                continue
+            try:
+                command = json.loads(raw)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                logger.warning("ignored malformed local-console command")
+                continue
+            agent_id = command.get("agent_id") if isinstance(command, dict) else None
+            message = command.get("message") if isinstance(command, dict) else None
+            if not isinstance(agent_id, str) or not isinstance(message, str):
+                continue
+            delivered = await coordinator.send(
+                agent_id,
+                {"from": "user", "content": message, "type": "instruction"},
+            )
+            if not delivered:
+                logger.warning("local-console command was not delivered to agent %s", agent_id)
 
 
 def _resolve_sandbox_image() -> str:
@@ -90,11 +138,13 @@ async def run_cli(args: Any) -> None:  # noqa: PLR0915
         "run_name": args.run_name,
         "diff_scope": getattr(args, "diff_scope", {"active": False}),
         "scan_mode": scan_mode,
+        "report_language": getattr(args, "report_language", "zh-CN"),
         "non_interactive": bool(getattr(args, "non_interactive", False)),
         "local_sources": getattr(args, "local_sources", None) or [],
         "scope_mode": getattr(args, "scope_mode", "auto"),
         "diff_base": getattr(args, "diff_base", None),
         "resume_instruction": getattr(args, "user_explicit_instruction", None) or "",
+        "console_managed": bool(getattr(args, "console_managed", False)),
     }
 
     report_state = ReportState(args.run_name)
@@ -152,6 +202,16 @@ async def run_cli(args: Any) -> None:  # noqa: PLR0915
             padding=(1, 2),
         )
 
+    console_managed = bool(getattr(args, "console_managed", False))
+    coordinator = AgentCoordinator() if console_managed else None
+    command_task: asyncio.Task[None] | None = None
+    if coordinator is not None:
+        command_path = runtime_state_dir(run_dir_for(args.run_name)) / "console-commands.jsonl"
+        command_task = asyncio.create_task(
+            _watch_console_commands(coordinator, command_path),
+            name=f"console-commands-{args.run_name}",
+        )
+
     try:
         console.print()
 
@@ -176,14 +236,15 @@ async def run_cli(args: Any) -> None:  # noqa: PLR0915
                     "CLI launching scan: run_name=%s targets=%d interactive=%s",
                     args.run_name,
                     len(scan_config.get("targets") or []),
-                    bool(getattr(args, "interactive", False)),
+                    console_managed,
                 )
                 await run_strix_scan(
                     scan_config=scan_config,
                     scan_id=args.run_name,
                     image=_resolve_sandbox_image(),
                     local_sources=getattr(args, "local_sources", None) or [],
-                    interactive=bool(getattr(args, "interactive", False)),
+                    coordinator=coordinator,
+                    interactive=console_managed,
                     max_budget_usd=getattr(args, "max_budget_usd", None),
                     max_turns=getattr(args, "max_turns", DEFAULT_MAX_TURNS),
                 )
@@ -196,6 +257,11 @@ async def run_cli(args: Any) -> None:  # noqa: PLR0915
     except Exception as e:
         console.print(f"[bold red]Error during penetration test:[/] {e}")
         raise
+    finally:
+        if command_task is not None:
+            command_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await command_task
 
     if report_state.final_scan_result:
         console.print()

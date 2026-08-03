@@ -29,42 +29,42 @@ export interface StatusMeta {
 
 export const STATUS_META: Record<VulnerabilityStatus, StatusMeta> = {
   open: {
-    label: "Open",
+    label: "待处理",
     color: "bg-red-500/10 text-red-400 border-red-500/20",
     dotColor: "bg-red-500",
-    description: "Newly discovered, awaiting triage",
+    description: "刚发现，等待分流",
   },
   in_progress: {
-    label: "In Progress",
+    label: "处理中",
     color: "bg-blue-500/10 text-blue-400 border-blue-500/20",
     dotColor: "bg-blue-500",
-    description: "Someone is working on this",
+    description: "正在处理中",
   },
   snoozed: {
-    label: "Snoozed",
+    label: "已延后",
     color: "bg-purple-500/10 text-purple-400 border-purple-500/20",
     dotColor: "bg-purple-500",
-    description: "Temporarily hidden until a follow-up date",
+    description: "暂时隐藏，直到后续日期",
   },
   fixed: {
-    label: "Fixed",
+    label: "已修复",
     color: "bg-emerald-500/10 text-emerald-400 border-emerald-500/20",
     dotColor: "bg-emerald-500",
-    description: "This vulnerability has been fixed",
+    description: "该漏洞已修复",
   },
   ignored: {
-    label: "Ignored",
+    label: "已忽略",
     color: "bg-gray-500/10 text-gray-400 border-gray-500/20",
     dotColor: "bg-gray-500",
-    description: "Acknowledged but accepted",
+    description: "已确认并接受风险",
   },
 };
 
 export const FIX_EFFORT_META: Record<FixEffort, { label: string; color: string }> = {
-  trivial: { label: "Trivial", color: "bg-emerald-500/10 text-emerald-400 border-emerald-500/20" },
-  low: { label: "Low", color: "bg-blue-500/10 text-blue-400 border-blue-500/20" },
-  medium: { label: "Medium", color: "bg-yellow-500/10 text-yellow-400 border-yellow-500/20" },
-  high: { label: "High", color: "bg-orange-500/10 text-orange-400 border-orange-500/20" },
+  trivial: { label: "极低", color: "bg-emerald-500/10 text-emerald-400 border-emerald-500/20" },
+  low: { label: "低", color: "bg-blue-500/10 text-blue-400 border-blue-500/20" },
+  medium: { label: "中", color: "bg-yellow-500/10 text-yellow-400 border-yellow-500/20" },
+  high: { label: "高", color: "bg-orange-500/10 text-orange-400 border-orange-500/20" },
 };
 
 export interface CodeLocation {

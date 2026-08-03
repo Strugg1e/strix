@@ -34,9 +34,11 @@ from strix.core.execution import (
 from strix.core.hooks import BudgetExceededError, ReportUsageHooks, recomputed_budget_flags
 from strix.core.inputs import (
     DEFAULT_MAX_TURNS,
+    DEFAULT_REPORT_LANGUAGE,
     build_root_task,
     build_scope_context,
     make_model_settings,
+    validate_report_language,
 )
 from strix.core.paths import run_dir_for, runtime_state_dir
 from strix.core.sessions import open_agent_session
@@ -131,6 +133,13 @@ async def run_strix_scan(
     """
     if scan_id is None:
         scan_id = f"scan-{uuid.uuid4().hex[:8]}"
+
+    raw_report_language = scan_config.get("report_language", DEFAULT_REPORT_LANGUAGE)
+    try:
+        report_language = validate_report_language(raw_report_language)
+    except ValueError as exc:
+        raise ValueError(str(exc)) from exc
+    scan_config = {**scan_config, "report_language": report_language}
 
     run_dir = run_dir_for(scan_id)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -330,6 +339,7 @@ async def run_strix_scan(
             "interactive": interactive,
             "spawn_child_agent": spawn_child_agent,
             "max_context_images": settings.runtime.max_context_images,
+            "terminate_when_completed": bool(scan_config.get("console_managed", False)),
         }
 
         root_session = open_agent_session(root_id, agents_db)
