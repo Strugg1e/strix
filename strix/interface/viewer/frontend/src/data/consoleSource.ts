@@ -10,6 +10,7 @@ export type AssetKind = "target" | "mount" | "target_list";
 export type ScanMode = "quick" | "standard" | "deep";
 export type ScopeMode = "auto" | "diff" | "full";
 export type ReportLanguage = "zh-CN" | "en";
+export type ExecutionStrategy = "auto" | "single" | "batched";
 
 export interface ProjectAsset {
   id: string;
@@ -55,7 +56,7 @@ export interface ConsoleJob {
   scope_mode: string;
   max_turns: number;
   max_budget_usd: number | null;
-  status: "running" | "stopping" | "completed" | "stopped" | "failed";
+  status: "queued" | "running" | "stopping" | "completed" | "stopped" | "failed";
   started_at: string;
   finished_at: string | null;
   returncode: number | null;
@@ -69,6 +70,33 @@ export interface ConsoleJob {
   project_name: string;
   use_proxy: boolean;
   report_language?: ReportLanguage;
+  error?: string | null;
+  execution_strategy?: ExecutionStrategy;
+  batch_id?: string | null;
+  batch_index?: number | null;
+  batch_total?: number | null;
+  batch_asset_count?: number | null;
+  batch_concurrency?: number | null;
+  group_max_budget_usd?: number | null;
+}
+
+export interface BatchGroup {
+  batch_id: string;
+  execution_strategy: ExecutionStrategy;
+  batch_size: number;
+  concurrency: number;
+  total_assets: number;
+  total_batches: number;
+  max_budget_usd: number | null;
+  project_id: string;
+  project_name: string;
+  status: "queued" | "running" | "completed" | "failed" | "stopped";
+  error: string | null;
+  running: number;
+  queued: number;
+  completed: number;
+  failed: number;
+  stopped: number;
 }
 
 export interface LLMProfile {
@@ -84,6 +112,8 @@ export interface ConsoleStatus {
   active_job: ConsoleJob | null;
   active_jobs: ConsoleJob[];
   running_count: number;
+  queued_count: number;
+  batch_groups: BatchGroup[];
   profiles: LLMProfile[];
   default_profile_id: string;
   work_dir: string;
@@ -205,6 +235,9 @@ export interface LaunchPayload extends ScanDefaults {
   project_id: string;
   asset_ids: string[];
   confirmation: string;
+  execution_strategy: ExecutionStrategy;
+  batch_size: number;
+  batch_concurrency: number;
 }
 
 export interface ResumePayload {
@@ -252,6 +285,8 @@ export async function fetchConsoleStatus(): Promise<ConsoleStatus> {
     active_jobs: activeJobs,
     running_count:
       typeof data.running_count === "number" ? data.running_count : activeJobs.length,
+    queued_count: typeof data.queued_count === "number" ? data.queued_count : 0,
+    batch_groups: Array.isArray(data.batch_groups) ? data.batch_groups : [],
     profiles: Array.isArray(data.profiles) ? data.profiles : [],
     default_profile_id: data.default_profile_id ?? "environment",
     work_dir: data.work_dir ?? "",

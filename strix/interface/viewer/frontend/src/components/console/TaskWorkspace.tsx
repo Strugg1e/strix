@@ -24,6 +24,8 @@ import {
   type ConsoleJob,
   type ConsoleProject,
   type ConsoleStatus,
+  type BatchGroup,
+  type ExecutionStrategy,
   type LaunchPayload,
   type ResumePayload,
   type RunSnapshot,
@@ -59,6 +61,25 @@ function launchDefaults(project: ConsoleProject): LaunchPayload {
     project_id: project.id,
     asset_ids: project.assets.filter((asset) => asset.enabled).map((asset) => asset.id),
     confirmation: "",
+    execution_strategy: "auto",
+    batch_size: 6,
+    batch_concurrency: 2,
+  };
+}
+
+function batchPlan(form: LaunchPayload): { batches: number; maxParallel: number; assetsPerBatch: number } {
+  const count = form.asset_ids.length;
+  if (count === 0) return { batches: 0, maxParallel: 0, assetsPerBatch: form.batch_size };
+  const batches =
+    form.execution_strategy === "single"
+      ? 1
+      : form.execution_strategy === "auto" && count <= form.batch_size
+        ? 1
+        : Math.ceil(count / form.batch_size);
+  return {
+    batches,
+    maxParallel: Math.min(batches, form.batch_concurrency),
+    assetsPerBatch: form.batch_size,
   };
 }
 
@@ -224,10 +245,17 @@ export function TaskWorkspace({
   if (!project || !form) {
     return (
       <div className="min-w-0 space-y-5">
-        <GlobalTaskSummary activeJobs={activeJobs} runningCount={status?.running_count ?? activeJobs.length} />
+        <GlobalTaskSummary
+          activeJobs={activeJobs}
+          runningCount={status?.running_count ?? activeJobs.length}
+          queuedCount={status?.queued_count ?? 0}
+          batchGroups={status?.batch_groups ?? []}
+        />
         <ActiveTaskList
           jobs={activeJobs}
           liveTasks={liveTasks}
+          batchGroups={status?.batch_groups ?? []}
+          queuedCount={status?.queued_count ?? 0}
           stopConfirmRun={stopConfirmRun}
           setStopConfirmRun={setStopConfirmRun}
           stopBusyRun={stopBusyRun}
@@ -292,15 +320,27 @@ export function TaskWorkspace({
   };
 
   const selectedAssets = new Set(form.asset_ids);
+  const plan = batchPlan(form);
+  const budgetPerBatch =
+    form.max_budget_usd !== null && plan.batches > 0
+      ? form.max_budget_usd / plan.batches
+      : null;
   const canReview = form.asset_ids.length > 0 && busy === null;
   const confirmed = form.confirmation.trim() === project.name;
 
   return (
     <div className="min-w-0 space-y-5">
-      <GlobalTaskSummary activeJobs={activeJobs} runningCount={status?.running_count ?? activeJobs.length} />
+      <GlobalTaskSummary
+        activeJobs={activeJobs}
+        runningCount={status?.running_count ?? activeJobs.length}
+        queuedCount={status?.queued_count ?? 0}
+        batchGroups={status?.batch_groups ?? []}
+      />
       <ActiveTaskList
         jobs={activeJobs}
         liveTasks={liveTasks}
+        batchGroups={status?.batch_groups ?? []}
+        queuedCount={status?.queued_count ?? 0}
         stopConfirmRun={stopConfirmRun}
         setStopConfirmRun={setStopConfirmRun}
         stopBusyRun={stopBusyRun}
@@ -466,6 +506,62 @@ export function TaskWorkspace({
               />
             </div>
 
+            <div className="rounded-lg bg-amber-400/[0.055] p-4 ring-1 ring-inset ring-amber-400/20">
+              <div className="flex items-start gap-3">
+                <SlidersHorizontal className="mt-0.5 h-4 w-4 flex-none text-amber-300" />
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <h3 className="text-sm font-semibold text-amber-100">执行批次</h3>
+                      <p className="mt-1 text-xs leading-5 text-[#777]">
+                        每个批次都是独立 CLI 运行，排队任务不会占用活动任务槽位。
+                      </p>
+                    </div>
+                    <span className="font-mono text-[11px] tabular-nums text-amber-200">
+                      预计 {plan.batches} 批 · 最多 {plan.maxParallel} 批并行
+                    </span>
+                  </div>
+                  <div className="mt-4 grid gap-4 sm:grid-cols-3">
+                    <SelectField
+                      label="执行策略"
+                      value={form.execution_strategy}
+                      options={[
+                        ["auto", "自动（推荐）"],
+                        ["single", "单任务"],
+                        ["batched", "按资产分批"],
+                      ]}
+                      onChange={(execution_strategy) =>
+                        patch({ execution_strategy: execution_strategy as ExecutionStrategy })
+                      }
+                    />
+                    <NumberField
+                      label="每批资产数"
+                      value={form.batch_size}
+                      min={1}
+                      max={20}
+                      onChange={(batch_size) => patch({ batch_size: batch_size ?? 6 })}
+                    />
+                    <NumberField
+                      label="批次并发数"
+                      value={form.batch_concurrency}
+                      min={1}
+                      max={4}
+                      onChange={(batch_concurrency) =>
+                        patch({ batch_concurrency: batch_concurrency ?? 2 })
+                      }
+                    />
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-[#777]">
+                    <span>范围：{form.asset_ids.length} 个资产</span>
+                    <span>每批最多：{plan.assetsPerBatch} 个</span>
+                    {budgetPerBatch !== null && (
+                      <span>每批预算：${budgetPerBatch.toFixed(2)}（总额 ${form.max_budget_usd!.toFixed(2)}）</span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+
             <div className="grid gap-4 sm:grid-cols-2">
               <SelectField
                 label="LLM 配置"
@@ -534,7 +630,10 @@ export function TaskWorkspace({
                   <div className="min-w-0 flex-1">
                     <h3 className="text-sm font-semibold text-amber-100">启动前授权确认</h3>
                     <p className="mt-1 text-xs leading-5 text-[#aaa]">
-                      即将对 {form.asset_ids.length} 个项目资产执行主动安全测试。请输入项目名称确认范围。
+                      即将对 {form.asset_ids.length} 个项目资产执行主动安全测试，计划拆成 {plan.batches} 批，最多同时运行 {plan.maxParallel} 批。
+                      {budgetPerBatch !== null
+                        ? ` 总预算 $${form.max_budget_usd!.toFixed(2)} 将均分为每批 $${budgetPerBatch.toFixed(2)}。`
+                        : " 未设置总预算。"}请输入项目名称确认范围。
                     </p>
                     <code className="mt-3 block rounded-md bg-black/50 px-3 py-2 text-xs text-amber-100">
                       {project.name}
@@ -607,16 +706,22 @@ export function TaskWorkspace({
 function GlobalTaskSummary({
   activeJobs,
   runningCount,
+  queuedCount,
+  batchGroups,
 }: {
   activeJobs: ConsoleJob[];
   runningCount: number;
+  queuedCount: number;
+  batchGroups: BatchGroup[];
 }) {
   const projectCount = new Set(activeJobs.map((job) => job.project_id).filter(Boolean)).size;
   return (
-    <section className="grid gap-px overflow-hidden rounded-xl bg-white/[0.07] ring-1 ring-inset ring-white/[0.08] sm:grid-cols-3">
+    <section className="grid gap-px overflow-hidden rounded-xl bg-white/[0.07] ring-1 ring-inset ring-white/[0.08] sm:grid-cols-3 lg:grid-cols-5">
       <Metric label="运行中" value={formatCount(runningCount)} />
       <Metric label="并行项目" value={formatCount(projectCount)} />
       <Metric label="活动任务" value={formatCount(activeJobs.length)} />
+      <Metric label="批次组" value={formatCount(batchGroups.length)} />
+      <Metric label="排队批次" value={formatCount(queuedCount)} />
     </section>
   );
 }
@@ -624,6 +729,8 @@ function GlobalTaskSummary({
 function ActiveTaskList({
   jobs,
   liveTasks,
+  batchGroups,
+  queuedCount,
   stopConfirmRun,
   setStopConfirmRun,
   stopBusyRun,
@@ -631,6 +738,8 @@ function ActiveTaskList({
 }: {
   jobs: ConsoleJob[];
   liveTasks: Record<string, ConsoleLiveTask>;
+  batchGroups: BatchGroup[];
+  queuedCount: number;
   stopConfirmRun: string | null;
   setStopConfirmRun: (runName: string | null) => void;
   stopBusyRun: string | null;
@@ -641,8 +750,15 @@ function ActiveTaskList({
       <div className="flex items-center gap-2 border-b border-white/[0.07] px-5 py-4">
         <Activity className="h-4 w-4 text-emerald-300" />
         <h2 className="text-sm font-semibold">并行活动任务</h2>
-        <span className="ml-auto text-[11px] tabular-nums text-[#666]">{jobs.length}</span>
+        <span className="ml-auto text-[11px] tabular-nums text-[#666]">
+          {jobs.length} 运行 · {queuedCount} 排队
+        </span>
       </div>
+      {batchGroups.length > 0 && (
+        <div className="grid gap-2 border-b border-white/[0.07] p-3 sm:grid-cols-2">
+          {batchGroups.map((group) => <BatchGroupSummary key={group.batch_id} group={group} />)}
+        </div>
+      )}
       {jobs.length === 0 ? (
         <p className="px-5 py-6 text-xs text-[#666]">当前没有运行中的任务。</p>
       ) : (
@@ -667,6 +783,43 @@ function ActiveTaskList({
         </div>
       )}
     </section>
+  );
+}
+
+function BatchGroupSummary({ group }: { group: BatchGroup }) {
+  const status = batchStatusLabel(group.status);
+  return (
+    <div className="min-w-0 rounded-lg bg-amber-400/[0.055] px-3 py-3 ring-1 ring-inset ring-amber-400/20">
+      <div className="flex items-center gap-2">
+        <span className={`h-2 w-2 rounded-full ${status.dot}`} />
+        <p className="min-w-0 flex-1 truncate text-xs font-semibold text-[#ddd]">
+          {group.project_name || "批次组"}
+        </p>
+        <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${status.style}`}>
+          {status.label}
+        </span>
+      </div>
+      <p className="mt-2 font-mono text-[10px] text-[#666]">{group.batch_id}</p>
+      <div className="mt-3 grid grid-cols-4 gap-1.5 text-center">
+        <BatchCount label="运行" value={group.running} color="text-emerald-300" />
+        <BatchCount label="排队" value={group.queued} color="text-amber-200" />
+        <BatchCount label="完成" value={group.completed} color="text-emerald-300" />
+        <BatchCount label="失败" value={group.failed} color="text-red-300" />
+      </div>
+      <p className="mt-2 text-[10px] tabular-nums text-[#777]">
+        {group.total_batches} 批 · {group.total_assets} 个资产 · 最多 {group.concurrency} 并行 · 已停 {group.stopped}
+      </p>
+      {group.error && <p className="mt-2 break-words text-[10px] leading-4 text-red-300">{group.error}</p>}
+    </div>
+  );
+}
+
+function BatchCount({ label, value, color }: { label: string; value: number; color: string }) {
+  return (
+    <div className="rounded bg-black/25 px-1.5 py-1.5">
+      <p className="text-[9px] text-[#666]">{label}</p>
+      <p className={`mt-0.5 text-sm font-semibold tabular-nums ${color}`}>{value}</p>
+    </div>
   );
 }
 
@@ -705,6 +858,14 @@ function ActiveJob({
           </div>
           <p className="mt-1 flex flex-wrap gap-x-2 font-mono text-[10px] text-[#5f5f5f]">
             <span>{job.run_name}</span><span>·</span><span>{job.profile_name}</span><span>{job.model}</span>
+            {job.batch_id && job.batch_index && job.batch_total && (
+              <>
+                <span>·</span>
+                <span>批次 {job.batch_index}/{job.batch_total}</span>
+                <span>·</span>
+                <span>{job.batch_asset_count ?? job.targets.length} 个资产</span>
+              </>
+            )}
           </p>
         </div>
         <a
@@ -770,7 +931,11 @@ function ActiveJob({
               </button>
             ) : (
               <div className="space-y-2 rounded-md bg-red-500/[0.06] p-3 ring-1 ring-inset ring-red-500/20">
-                <p className="text-[11px] leading-5 text-red-200">中断 Agent，已写入结果会保留。</p>
+                <p className="text-[11px] leading-5 text-red-200">
+                  {job.batch_id
+                    ? "将停止整个批次组，排队批次也会取消；已写入结果会保留。"
+                    : "中断 Agent，已写入结果会保留。"}
+                </p>
                 <div className="grid grid-cols-2 gap-2">
                   <button type="button" onClick={() => setStopConfirm(false)} className="min-h-10 rounded-md text-xs text-[#aaa] active:scale-95">取消</button>
                   <button type="button" disabled={busy === "stop"} onClick={onStop} className="min-h-10 rounded-md bg-red-400 text-xs font-bold text-black active:scale-95 disabled:opacity-40">确认</button>
@@ -1271,9 +1436,30 @@ function profileName(status: ConsoleStatus | null, profileId: string): string {
 }
 
 function statusLabel(status: ConsoleJob["status"]): { label: string; style: string } {
+  if (status === "queued") return { label: "排队中", style: "bg-amber-500/[0.09] text-amber-200" };
   if (status === "running") return { label: "运行中", style: "bg-emerald-500/[0.09] text-emerald-300" };
   if (status === "stopping") return { label: "停止中", style: "bg-amber-500/[0.09] text-amber-200" };
   if (status === "completed") return { label: "已完成", style: "bg-emerald-500/[0.09] text-emerald-300" };
   if (status === "failed") return { label: "失败", style: "bg-red-500/[0.09] text-red-300" };
   return { label: "已停止", style: "bg-white/[0.06] text-[#aaa]" };
+}
+
+function batchStatusLabel(status: BatchGroup["status"]): {
+  label: string;
+  style: string;
+  dot: string;
+} {
+  if (status === "queued") {
+    return { label: "排队中", style: "bg-amber-500/[0.09] text-amber-200", dot: "bg-amber-300" };
+  }
+  if (status === "running") {
+    return { label: "运行中", style: "bg-amber-500/[0.09] text-amber-200", dot: "animate-pulse bg-amber-300" };
+  }
+  if (status === "completed") {
+    return { label: "已完成", style: "bg-emerald-500/[0.09] text-emerald-300", dot: "bg-emerald-300" };
+  }
+  if (status === "failed") {
+    return { label: "有失败", style: "bg-red-500/[0.09] text-red-300", dot: "bg-red-400" };
+  }
+  return { label: "已停止", style: "bg-white/[0.06] text-[#aaa]", dot: "bg-[#888]" };
 }

@@ -794,6 +794,24 @@ def _parallel_payload(target: str) -> dict[str, Any]:
     }
 
 
+def _batch_payload(count: int, **overrides: Any) -> dict[str, Any]:
+    assets = [
+        {
+            "id": f"asset-{index}",
+            "kind": "target",
+            "value": f"https://asset-{index}.example",
+        }
+        for index in range(count)
+    ]
+    return {
+        "assets": assets,
+        "confirmation": assets[0]["value"],
+        "profile_id": "test",
+        "max_turns": 10,
+        **overrides,
+    }
+
+
 def _write_run_artifacts(
     base_dir: Path,
     run_name: str,
@@ -885,6 +903,228 @@ def test_stop_one_parallel_job_does_not_signal_sibling(
     assert status["running_count"] == 1
     assert [job["id"] for job in status["active_jobs"]] == [second["id"]]
     processes[1].finish()
+
+
+def test_batch_auto_splits_assets_and_fills_concurrency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    processes: list[_ParallelProcess] = []
+
+    def fake_popen(_command: list[str], **_kwargs: Any) -> _ParallelProcess:
+        process = _ParallelProcess(70_000 + len(processes))
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr("strix.interface.console.subprocess.Popen", fake_popen)
+    manager = RunManager(tmp_path, profile_store=_FakeProfileStore())  # type: ignore[arg-type]
+    first = manager.start(
+        _batch_payload(
+            5,
+            execution_strategy="auto",
+            batch_size=2,
+            batch_concurrency=2,
+        )
+    )
+
+    assert first["execution_strategy"] == "batched"
+    assert first["batch_index"] == 1
+    assert first["batch_total"] == 3
+    assert first["batch_asset_count"] == 2
+    assert len(processes) == 2
+    status = manager.status_payload()
+    assert status["queued_count"] == 1
+    group = status["batch_groups"][0]
+    assert group["total_assets"] == 5
+    assert group["total_batches"] == 3
+    assert group["running"] == 2
+    assert group["queued"] == 1
+
+    processes[0].finish()
+    deadline = time.monotonic() + 1
+    while time.monotonic() < deadline and len(processes) < 3:
+        time.sleep(0.01)
+    assert len(processes) == 3
+    for process in processes:
+        process.finish()
+    deadline = time.monotonic() + 1
+    while (
+        time.monotonic() < deadline
+        and manager.status_payload()["batch_groups"][0]["status"] != "completed"
+    ):
+        time.sleep(0.01)
+    assert manager.status_payload()["batch_groups"][0]["status"] == "completed"
+
+
+def test_batch_budget_is_divided_per_child_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    commands: list[list[str]] = []
+    processes: list[_ParallelProcess] = []
+
+    def fake_popen(command: list[str], **_kwargs: Any) -> _ParallelProcess:
+        commands.append(command)
+        process = _ParallelProcess(71_000 + len(processes))
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr("strix.interface.console.subprocess.Popen", fake_popen)
+    manager = RunManager(tmp_path, profile_store=_FakeProfileStore())  # type: ignore[arg-type]
+    manager.start(
+        _batch_payload(
+            4,
+            execution_strategy="batched",
+            batch_size=2,
+            batch_concurrency=2,
+            max_budget_usd=9,
+        )
+    )
+
+    assert len(commands) == 2
+    assert [command[command.index("--max-budget") + 1] for command in commands] == ["4.5", "4.5"]
+    assert [
+        value
+        for command in commands
+        for index, value in enumerate(command)
+        if index > 0 and command[index - 1] == "--target"
+    ] == [f"https://asset-{index}.example" for index in range(4)]
+    status = manager.status_payload()
+    assert status["batch_groups"][0]["max_budget_usd"] == 9.0
+    for process in processes:
+        process.finish()
+
+
+def test_first_batch_spawn_failure_clears_group_queue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def failing_popen(_command: list[str], **_kwargs: Any) -> _ParallelProcess:
+        raise OSError("spawn unavailable")
+
+    monkeypatch.setattr("strix.interface.console.subprocess.Popen", failing_popen)
+    manager = RunManager(tmp_path, profile_store=_FakeProfileStore())  # type: ignore[arg-type]
+    with pytest.raises(ConsoleRequestError, match="无法启动 Strix"):
+        manager.start(
+            _batch_payload(5, execution_strategy="batched", batch_size=1, batch_concurrency=2)
+        )
+    status = manager.status_payload()
+    assert status["queued_count"] == 0
+    assert status["batch_groups"][0]["status"] == "failed"
+    assert status["batch_groups"][0]["failed"] == 1
+    assert "无法启动 Strix" in status["batch_groups"][0]["error"]
+
+
+def test_later_batch_spawn_failure_marks_child_and_fills_slot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    processes: list[_ParallelProcess] = []
+    calls = 0
+
+    def selective_popen(_command: list[str], **_kwargs: Any) -> _ParallelProcess:
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise OSError("one child could not start")
+        process = _ParallelProcess(74_000 + len(processes))
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr("strix.interface.console.subprocess.Popen", selective_popen)
+    manager = RunManager(tmp_path, profile_store=_FakeProfileStore())  # type: ignore[arg-type]
+    manager.start(
+        _batch_payload(4, execution_strategy="batched", batch_size=1, batch_concurrency=2)
+    )
+    assert len(processes) == 2
+    processes[0].finish()
+    deadline = time.monotonic() + 1
+    while time.monotonic() < deadline and len(processes) < 3:
+        time.sleep(0.01)
+    assert len(processes) == 3
+    for process in processes:
+        process.finish()
+    deadline = time.monotonic() + 1
+    while (
+        time.monotonic() < deadline
+        and manager.status_payload()["batch_groups"][0]["status"] != "failed"
+    ):
+        time.sleep(0.01)
+    group = manager.status_payload()["batch_groups"][0]
+    assert group["status"] == "failed"
+    assert group["failed"] == 1
+    assert group["completed"] == 3
+
+
+def test_stop_batch_group_signals_running_and_cancels_queued(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    processes: list[_ParallelProcess] = []
+    killpg_calls: list[int] = []
+
+    def fake_popen(_command: list[str], **_kwargs: Any) -> _ParallelProcess:
+        process = _ParallelProcess(72_000 + len(processes))
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr("strix.interface.console.subprocess.Popen", fake_popen)
+    monkeypatch.setattr(
+        "strix.interface.console.os.killpg",
+        lambda pid, _value: killpg_calls.append(pid),
+    )
+    manager = RunManager(tmp_path, profile_store=_FakeProfileStore())  # type: ignore[arg-type]
+    first = manager.start(
+        _batch_payload(5, execution_strategy="batched", batch_size=1, batch_concurrency=2)
+    )
+
+    result = manager.stop(first["id"])
+    assert result["status"] == "stopping"
+    assert killpg_calls == [process.pid for process in processes]
+    status = manager.status_payload()
+    assert status["queued_count"] == 0
+    assert status["batch_groups"][0]["stopped"] == 3
+    for process in processes:
+        process.finish(-2)
+    deadline = time.monotonic() + 1
+    while (
+        time.monotonic() < deadline
+        and manager.status_payload()["batch_groups"][0]["status"] != "stopped"
+    ):
+        time.sleep(0.01)
+    assert manager.status_payload()["batch_groups"][0]["status"] == "stopped"
+
+
+def test_single_execution_strategy_preserves_one_run_compatibility(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    processes: list[_ParallelProcess] = []
+    monkeypatch.setattr(
+        "strix.interface.console.subprocess.Popen",
+        lambda _command, **_kwargs: processes.append(_ParallelProcess(73_000)) or processes[-1],
+    )
+    manager = RunManager(tmp_path, profile_store=_FakeProfileStore())  # type: ignore[arg-type]
+    job = manager.start(_batch_payload(3, execution_strategy="single"))
+    assert job["execution_strategy"] == "single"
+    assert job["batch_id"] is None
+    assert manager.status_payload()["batch_groups"] == []
+    processes[0].finish()
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("execution_strategy", "invalid", "执行策略"),
+        ("batch_size", 0, "批次大小"),
+        ("batch_size", 21, "批次大小"),
+        ("batch_concurrency", 0, "批次并发数"),
+        ("batch_concurrency", 5, "批次并发数"),
+    ],
+)
+def test_batch_options_are_rejected_outside_supported_range(
+    tmp_path: Path,
+    field: str,
+    value: Any,
+    message: str,
+) -> None:
+    manager = RunManager(tmp_path, profile_store=_FakeProfileStore())  # type: ignore[arg-type]
+    with pytest.raises(ConsoleRequestError, match=message):
+        manager.start(_batch_payload(2, **{field: value}))
 
 
 def test_resume_conflicts_only_with_same_run(

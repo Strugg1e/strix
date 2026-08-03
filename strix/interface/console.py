@@ -40,6 +40,9 @@ _MAX_LOG_BYTES = 2_000_000
 _PROFILES_PATH = Path.home() / ".strix" / "console-profiles.json"
 _KEYCHAIN_SERVICE_PREFIX = "strix-console-profile:"
 _PROXY_ENV_NAMES = frozenset({"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"})
+_EXECUTION_STRATEGIES = frozenset({"auto", "single", "batched"})
+_DEFAULT_BATCH_SIZE = 6
+_DEFAULT_BATCH_CONCURRENCY = 2
 
 
 class ConsoleRequestError(ValueError):
@@ -74,6 +77,14 @@ class ConsoleJob:
     max_budget_usd: float | None = None
     use_proxy: bool = False
     report_language: str = DEFAULT_REPORT_LANGUAGE
+    error: str | None = None
+    execution_strategy: str = "single"
+    batch_id: str | None = None
+    batch_index: int | None = None
+    batch_total: int | None = None
+    batch_asset_count: int | None = None
+    batch_concurrency: int | None = None
+    group_max_budget_usd: float | None = None
 
 
 @dataclass(frozen=True)
@@ -350,6 +361,8 @@ class RunManager:
         self._jobs: dict[str, ConsoleJob] = {}
         self._processes: dict[str, subprocess.Popen[bytes]] = {}
         self._log_handles: dict[str, Any] = {}
+        self._batch_groups: dict[str, dict[str, Any]] = {}
+        self._batch_launch_specs: dict[str, tuple[list[str], dict[str, str]]] = {}
         self.profile_store = profile_store or ProfileStore()
         self.project_store = project_store or ProjectStore(self.log_dir / "projects.json")
 
@@ -369,11 +382,15 @@ class RunManager:
                     default=None,
                 )
                 active = asdict(latest) if latest is not None else None
+            queued_count = sum(job.status == "queued" for job in self._jobs.values())
+            batch_groups = self._batch_groups_payload_locked()
         profiles = self.profile_store.list_profiles()
         return {
             "active_job": active,
             "active_jobs": active_jobs,
             "running_count": len(active_jobs),
+            "queued_count": queued_count,
+            "batch_groups": batch_groups,
             "profiles": profiles,
             "default_profile_id": "environment",
             "work_dir": str(self.work_dir),
@@ -413,6 +430,52 @@ class RunManager:
                     active.append(job)
         active.sort(key=lambda item: (item.started_at, item.id))
         return [asdict(job) for job in active]
+
+    def _batch_groups_payload_locked(self) -> list[dict[str, Any]]:
+        groups: list[dict[str, Any]] = []
+        for group in self._batch_groups.values():
+            jobs = [self._jobs[job_id] for job_id in group["job_ids"] if job_id in self._jobs]
+            counts = {
+                "running": sum(job.status in {"running", "stopping"} for job in jobs),
+                "queued": sum(job.status == "queued" for job in jobs),
+                "completed": sum(job.status == "completed" for job in jobs),
+                "failed": sum(job.status == "failed" for job in jobs),
+                "stopped": sum(job.status == "stopped" for job in jobs),
+            }
+            total = int(group["total_batches"])
+            if counts["queued"] or counts["running"]:
+                status = "running" if counts["running"] else "queued"
+            elif counts["failed"]:
+                status = "failed"
+            elif counts["stopped"]:
+                status = "stopped"
+            elif counts["completed"] == total:
+                status = "completed"
+            else:
+                status = "running"
+            errors = [
+                job.error
+                for job in jobs
+                if job.error and job.status in {"failed", "stopped"}
+            ]
+            groups.append(
+                {
+                    "batch_id": group["batch_id"],
+                    "execution_strategy": group["execution_strategy"],
+                    "batch_size": group["batch_size"],
+                    "concurrency": group["concurrency"],
+                    "total_assets": group["total_assets"],
+                    "total_batches": total,
+                    "max_budget_usd": group.get("max_budget_usd"),
+                    "project_id": group.get("project_id", ""),
+                    "project_name": group.get("project_name", ""),
+                    "status": status,
+                    "error": errors[0] if errors else None,
+                    **counts,
+                }
+            )
+        groups.sort(key=lambda item: item["batch_id"])
+        return groups
 
     def enrich_run_entry(self, entry: dict[str, Any], run_dir: Path) -> dict[str, Any]:
         """Add console/project facts to a history entry.
@@ -552,43 +615,66 @@ class RunManager:
         assets = [self._resolve_asset(item) for item in assets]
         instruction_file = self._resolve_file(instruction_file, "指令文件")
         config_path = self._resolve_file(config_path, "配置文件")
+        execution_strategy = self._validate_execution_strategy(
+            payload.get("execution_strategy", "auto")
+        )
+        batch_size = self._validate_batch_option(
+            payload.get("batch_size", _DEFAULT_BATCH_SIZE),
+            "批次大小",
+            1,
+            20,
+        )
+        batch_concurrency = self._validate_batch_option(
+            payload.get("batch_concurrency", _DEFAULT_BATCH_CONCURRENCY),
+            "批次并发数",
+            1,
+            4,
+        )
+        effective_strategy = (
+            "batched"
+            if execution_strategy == "batched"
+            or (execution_strategy == "auto" and len(assets) > batch_size)
+            else "single"
+        )
+
+        if effective_strategy == "batched":
+            return self._start_batched(
+                assets=assets,
+                project_id=project_id,
+                project_name=project["name"] if project else "",
+                scan_mode=scan_mode,
+                scope_mode=scope_mode,
+                report_language=report_language,
+                max_turns=max_turns,
+                budget=budget,
+                instruction=instruction,
+                instruction_file=instruction_file,
+                diff_base=diff_base,
+                config_path=config_path,
+                profile=profile,
+                api_key=api_key,
+                model=model,
+                use_proxy=use_proxy,
+                execution_strategy=execution_strategy,
+                batch_size=batch_size,
+                batch_concurrency=batch_concurrency,
+            )
 
         with self._lock:
             run_name = self._new_run_name()
-            command = [
-                sys.executable,
-                "-m",
-                "strix.interface.main",
-                "--run-name",
-                run_name,
-                "--non-interactive",
-                "--console-managed",
-                "--scan-mode",
-                scan_mode,
-                "--scope-mode",
-                scope_mode,
-                "--report-language",
-                report_language,
-                "--max-turns",
-                str(max_turns),
-            ]
-            for asset in assets:
-                option = {
-                    "target": "--target",
-                    "mount": "--mount",
-                    "target_list": "--target-list",
-                }[asset["kind"]]
-                command.extend([option, asset["value"]])
-            if instruction:
-                command.extend(["--instruction", instruction])
-            if instruction_file:
-                command.extend(["--instruction-file", instruction_file])
-            if diff_base:
-                command.extend(["--diff-base", diff_base])
-            if config_path:
-                command.extend(["--config", config_path])
-            if budget is not None:
-                command.extend(["--max-budget", str(budget)])
+            command = self._build_start_command(
+                run_name=run_name,
+                assets=assets,
+                scan_mode=scan_mode,
+                scope_mode=scope_mode,
+                report_language=report_language,
+                max_turns=max_turns,
+                budget=budget,
+                instruction=instruction,
+                instruction_file=instruction_file,
+                diff_base=diff_base,
+                config_path=config_path,
+            )
             child_env = self._build_child_env(
                 model=model,
                 api_base=profile["api_base"],
@@ -621,6 +707,7 @@ class RunManager:
                     max_budget_usd=budget,
                     use_proxy=use_proxy,
                     report_language=report_language,
+                    execution_strategy=effective_strategy,
                 ),
                 append=False,
                 env=child_env,
@@ -637,32 +724,298 @@ class RunManager:
                     "project_name": project["name"] if project else "",
                     "use_proxy": use_proxy,
                     "report_language": report_language,
+                    "execution_strategy": execution_strategy,
+                    "effective_execution_strategy": effective_strategy,
+                    "batch_size": batch_size,
+                    "batch_concurrency": batch_concurrency,
                 },
             )
             if project_id:
                 self.project_store.attach_run(project_id, run_name)
             return result
 
+    def _start_batched(
+        self,
+        *,
+        assets: list[dict[str, str]],
+        project_id: str,
+        project_name: str,
+        scan_mode: str,
+        scope_mode: str,
+        report_language: str,
+        max_turns: int,
+        budget: float | None,
+        instruction: str,
+        instruction_file: str,
+        diff_base: str,
+        config_path: str,
+        profile: dict[str, Any],
+        api_key: str,
+        model: str,
+        use_proxy: bool,
+        execution_strategy: str,
+        batch_size: int,
+        batch_concurrency: int,
+    ) -> dict[str, Any]:
+        batches = [
+            assets[index : index + batch_size]
+            for index in range(0, len(assets), batch_size)
+        ]
+        batch_budget = budget / len(batches) if budget is not None else None
+
+        with self._lock:
+            batch_id = self._new_batch_id()
+            group: dict[str, Any] = {
+                "batch_id": batch_id,
+                "execution_strategy": execution_strategy,
+                "batch_size": batch_size,
+                "concurrency": batch_concurrency,
+                "total_assets": len(assets),
+                "total_batches": len(batches),
+                "max_budget_usd": budget,
+                "project_id": project_id,
+                "project_name": project_name,
+                "job_ids": [],
+                "queue": [],
+                "stop_requested": False,
+                "settings_common": {
+                    "profile_id": profile["id"],
+                    "profile_name": profile["name"],
+                    "model": model,
+                    "max_turns": max_turns,
+                    "group_max_budget_usd": budget,
+                    "project_id": project_id,
+                    "project_name": project_name,
+                    "use_proxy": use_proxy,
+                    "report_language": report_language,
+                    "execution_strategy": execution_strategy,
+                    "effective_execution_strategy": "batched",
+                    "batch_size": batch_size,
+                    "batch_concurrency": batch_concurrency,
+                    "batch_id": batch_id,
+                },
+            }
+            self._batch_groups[batch_id] = group
+            for index, batch_assets in enumerate(batches, start=1):
+                run_name = self._new_run_name()
+                command = self._build_start_command(
+                    run_name=run_name,
+                    assets=batch_assets,
+                    scan_mode=scan_mode,
+                    scope_mode=scope_mode,
+                    report_language=report_language,
+                    max_turns=max_turns,
+                    budget=batch_budget,
+                    instruction=instruction,
+                    instruction_file=instruction_file,
+                    diff_base=diff_base,
+                    config_path=config_path,
+                )
+                child_env = self._build_child_env(
+                    model=model,
+                    api_base=profile["api_base"],
+                    api_key=api_key,
+                    use_proxy=use_proxy,
+                )
+                primary_target = batch_assets[0]["value"]
+                job = ConsoleJob(
+                    id=run_name,
+                    run_name=run_name,
+                    target=(
+                        primary_target
+                        if len(batch_assets) == 1
+                        else f"{primary_target} 等 {len(batch_assets)} 个资产"
+                    ),
+                    target_kind=batch_assets[0]["kind"] if len(batch_assets) == 1 else "multiple",
+                    scan_mode=scan_mode,
+                    scope_mode=scope_mode,
+                    max_turns=max_turns,
+                    status="queued",
+                    started_at=datetime.now(UTC).isoformat(),
+                    profile_id=profile["id"],
+                    profile_name=profile["name"],
+                    model=model,
+                    targets=batch_assets,
+                    project_id=project_id,
+                    project_name=project_name,
+                    max_budget_usd=batch_budget,
+                    use_proxy=use_proxy,
+                    report_language=report_language,
+                    execution_strategy="batched",
+                    batch_id=batch_id,
+                    batch_index=index,
+                    batch_total=len(batches),
+                    batch_asset_count=len(batch_assets),
+                    batch_concurrency=batch_concurrency,
+                    group_max_budget_usd=budget,
+                )
+                self._jobs[run_name] = job
+                self._batch_launch_specs[run_name] = (command, child_env)
+                group["job_ids"].append(run_name)
+                group["queue"].append(run_name)
+
+            try:
+                self._pump_batch_group_locked(batch_id, initial=True)
+            except ConsoleRequestError as exc:
+                self._cancel_batch_group_locked(batch_id, reason=str(exc))
+                raise
+            return asdict(self._jobs[group["job_ids"][0]])
+
+    @staticmethod
+    def _build_start_command(
+        *,
+        run_name: str,
+        assets: list[dict[str, str]],
+        scan_mode: str,
+        scope_mode: str,
+        report_language: str,
+        max_turns: int,
+        budget: float | None,
+        instruction: str,
+        instruction_file: str,
+        diff_base: str,
+        config_path: str,
+    ) -> list[str]:
+        command = [
+            sys.executable,
+            "-m",
+            "strix.interface.main",
+            "--run-name",
+            run_name,
+            "--non-interactive",
+            "--console-managed",
+            "--scan-mode",
+            scan_mode,
+            "--scope-mode",
+            scope_mode,
+            "--report-language",
+            report_language,
+            "--max-turns",
+            str(max_turns),
+        ]
+        for asset in assets:
+            option = {
+                "target": "--target",
+                "mount": "--mount",
+                "target_list": "--target-list",
+            }[asset["kind"]]
+            command.extend([option, asset["value"]])
+        if instruction:
+            command.extend(["--instruction", instruction])
+        if instruction_file:
+            command.extend(["--instruction-file", instruction_file])
+        if diff_base:
+            command.extend(["--diff-base", diff_base])
+        if config_path:
+            command.extend(["--config", config_path])
+        if budget is not None:
+            command.extend(["--max-budget", str(budget)])
+        return command
+
+    def _pump_batch_group_locked(self, batch_id: str, *, initial: bool) -> None:
+        group = self._batch_groups.get(batch_id)
+        if group is None or group.get("stop_requested"):
+            return
+        initial_limit = min(group["concurrency"], group["total_batches"])
+        attempts = 0
+        while group["queue"] and self._batch_running_count_locked(group) < group["concurrency"]:
+            run_name = group["queue"].pop(0)
+            job = self._jobs.get(run_name)
+            spec = self._batch_launch_specs.pop(run_name, None)
+            if job is None or spec is None or job.status != "queued":
+                continue
+            attempts += 1
+            job.status = "running"
+            try:
+                self._spawn(spec[0], job, append=False, env=spec[1])
+                self._persist_batch_job_locked(group, job)
+            except ConsoleRequestError as exc:
+                job.status = "failed"
+                job.error = str(exc)
+                job.finished_at = datetime.now(UTC).isoformat()
+                if initial and attempts <= initial_limit:
+                    raise
+
+    def _batch_running_count_locked(self, group: dict[str, Any]) -> int:
+        return sum(
+            1
+            for job_id in group["job_ids"]
+            if job_id in self._processes
+            and self._processes[job_id].poll() is None
+        )
+
+    def _persist_batch_job_locked(self, group: dict[str, Any], job: ConsoleJob) -> None:
+        settings = {
+            **group["settings_common"],
+            "max_budget_usd": job.max_budget_usd,
+            "batch_index": job.batch_index,
+            "batch_total": job.batch_total,
+            "batch_asset_count": job.batch_asset_count,
+        }
+        self._save_run_settings(job.run_name, settings)
+        if job.project_id:
+            self.project_store.attach_run(job.project_id, job.run_name)
+
+    def _cancel_batch_group_locked(
+        self,
+        batch_id: str,
+        *,
+        reason: str,
+    ) -> None:
+        group = self._batch_groups.get(batch_id)
+        if group is None:
+            return
+        group["stop_requested"] = True
+        group["queue"] = []
+        for run_name in group["job_ids"]:
+            self._batch_launch_specs.pop(run_name, None)
+            job = self._jobs.get(run_name)
+            if job is None:
+                continue
+            process = self._processes.get(run_name)
+            if job.status == "queued":
+                job.status = "stopped"
+                job.error = reason
+                job.finished_at = datetime.now(UTC).isoformat()
+            elif process is not None and process.poll() is None:
+                self._signal_stop_locked(job, process)
+
+    def _signal_stop_locked(
+        self,
+        job: ConsoleJob,
+        process: subprocess.Popen[bytes],
+    ) -> None:
+        job.status = "stopping"
+        if os.name == "posix":
+            try:
+                os.killpg(process.pid, signal.SIGINT)
+            except ProcessLookupError:
+                process.send_signal(signal.SIGINT)
+        else:
+            process.send_signal(signal.SIGINT)
+        threading.Thread(
+            target=self._force_stop_after_timeout,
+            args=(process,),
+            name=f"strix-console-stop-{job.id}",
+            daemon=True,
+        ).start()
+
     def stop(self, job_id: str) -> dict[str, Any]:
         with self._lock:
-            job, process = self._require_active(job_id)
-            job.status = "stopping"
-            if os.name == "posix":
-                try:
-                    os.killpg(process.pid, signal.SIGINT)
-                except ProcessLookupError:
-                    # A test seam or a very short-lived child may not expose a
-                    # process group by the time stop is requested.  Signalling
-                    # the child still preserves the per-job stop contract.
-                    process.send_signal(signal.SIGINT)
-            else:
-                process.send_signal(signal.SIGINT)
-            threading.Thread(
-                target=self._force_stop_after_timeout,
-                args=(process,),
-                name=f"strix-console-stop-{job_id}",
-                daemon=True,
-            ).start()
+            job = self._jobs.get(job_id)
+            if job is None:
+                raise ConsoleRequestError("该任务当前未运行", HTTPStatus.CONFLICT)
+            if job.batch_id:
+                group = self._batch_groups.get(job.batch_id)
+                if group is None or (
+                    job.status not in {"queued", "running", "stopping"}
+                    and self._processes.get(job_id) is None
+                ):
+                    raise ConsoleRequestError("该任务当前未运行", HTTPStatus.CONFLICT)
+                self._cancel_batch_group_locked(job.batch_id, reason="用户停止了整个批次组")
+                return asdict(job)
+            _job, process = self._require_active(job_id)
+            self._signal_stop_locked(_job, process)
             return asdict(job)
 
     def resume(self, run_name: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -902,6 +1255,20 @@ class RunManager:
         return budget
 
     @staticmethod
+    def _validate_execution_strategy(value: Any) -> str:
+        if not isinstance(value, str) or value not in _EXECUTION_STRATEGIES:
+            raise ConsoleRequestError("执行策略必须是 auto、single 或 batched")
+        return value
+
+    @staticmethod
+    def _validate_batch_option(value: Any, label: str, minimum: int, maximum: int) -> int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ConsoleRequestError(f"{label}必须是整数")
+        if not minimum <= value <= maximum:
+            raise ConsoleRequestError(f"{label}必须在 {minimum} 到 {maximum} 之间")
+        return value
+
+    @staticmethod
     def _resolve_report_language(
         payload: dict[str, Any],
         inherited: dict[str, Any],
@@ -1061,12 +1428,29 @@ class RunManager:
                 job.status = "stopped"
             else:
                 job.status = "failed"
+            if job.batch_id:
+                group = self._batch_groups.get(job.batch_id)
+                if (
+                    group is not None
+                    and not was_stopped
+                    and returncode != 0
+                    and not run_record_path(self.runs_dir / job.run_name).is_file()
+                ):
+                    job.error = "批次未生成 run.json，可能是共享配置或启动失败"
+                    self._cancel_batch_group_locked(
+                        job.batch_id,
+                        reason=job.error,
+                    )
             # Remove only this run's process.  A sibling scan must remain
             # stoppable and visible while this watcher finalizes its job.
             if self._processes.get(job.id) is process:
                 self._processes.pop(job.id, None)
             if self._log_handles.get(job.id) is log_handle:
                 self._log_handles.pop(job.id, None)
+            if job.batch_id:
+                group = self._batch_groups.get(job.batch_id)
+                if group is not None and not group.get("stop_requested"):
+                    self._pump_batch_group_locked(job.batch_id, initial=False)
 
     def _force_stop_after_timeout(self, process: subprocess.Popen[bytes]) -> None:
         try:
@@ -1095,6 +1479,14 @@ class RunManager:
             if name not in self._jobs and not (self.runs_dir / name).exists():
                 return name
         raise ConsoleRequestError("无法分配新的任务名称")
+
+    def _new_batch_id(self) -> str:
+        for _ in range(20):
+            stamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+            batch_id = f"batch_{stamp}_{os.urandom(2).hex()}"
+            if batch_id not in self._batch_groups:
+                return batch_id
+        raise ConsoleRequestError("无法分配新的批次组")
 
     @staticmethod
     def _target_from_record(run_dir: Path) -> str:
