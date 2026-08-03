@@ -29,7 +29,15 @@ import {
 } from "@/data/consoleSource";
 import type { ConsoleLiveTask } from "@/components/ConsoleApp";
 import type { RunListEntry } from "@/data/serverSource";
-import { activeJobsForProject, runsForProject } from "@/lib/console-aggregation";
+import {
+  activeJobsForProject,
+  isUnassignedRun,
+  projectForRun,
+  projectLabelForRun,
+  runsForHistoryFilter,
+  runsForProject,
+  type HistoryFilter,
+} from "@/lib/console-aggregation";
 import {
   FieldLabel,
   NumberField,
@@ -83,16 +91,22 @@ export function TaskWorkspace({
   const [stopBusyRun, setStopBusyRun] = useState<string | null>(null);
   const [busy, setBusy] = useState<"launch" | "stop" | "resume" | null>(null);
   const [resumeRun, setResumeRun] = useState<RunListEntry | null>(null);
+  const [resumeProject, setResumeProject] = useState<ConsoleProject | null>(null);
   const [resumeForm, setResumeForm] = useState<ResumePayload>({});
+  const [historyFilter, setHistoryFilter] = useState<HistoryFilter>("all");
 
   useEffect(() => {
     if (!project) {
       setForm(null);
+      setHistoryFilter("all");
+      setResumeProject(null);
+      setResumeRun(null);
       return;
     }
     setForm(launchDefaults(project));
     setReviewing(false);
     setResumeRun(null);
+    setResumeProject(null);
   }, [project?.id, project?.updated_at]);
 
   const projectJobs = project ? activeJobsForProject(project.id, activeJobs) : [];
@@ -100,6 +114,10 @@ export function TaskWorkspace({
     if (!project) return [];
     return runsForProject(project, runs);
   }, [project, runs]);
+  const historyRuns = useMemo(
+    () => runsForHistoryFilter(historyFilter, project, runs),
+    [historyFilter, project, runs]
+  );
 
   const stop = async (job: ConsoleJob) => {
     setStopBusyRun(job.id);
@@ -113,6 +131,43 @@ export function TaskWorkspace({
       setError(cause instanceof Error ? cause.message : "停止任务失败");
     } finally {
       setStopBusyRun(null);
+      setBusy(null);
+    }
+  };
+
+  const openResume = (run: RunListEntry) => {
+    const sourceProject = projectForRun(run, projects) ?? null;
+    // A missing project_id is legacy/ambiguous data: let the server inherit its
+    // persisted run settings instead of silently applying the current project.
+    const defaults = !isUnassignedRun(run) ? sourceProject?.defaults : undefined;
+    setResumeProject(sourceProject);
+    setResumeRun(run);
+    setResumeForm(
+      defaults
+        ? {
+            profile_id: defaults.profile_id || "environment",
+            model: defaults.model,
+            max_turns: defaults.max_turns,
+            max_budget_usd: defaults.max_budget_usd,
+            instruction: "",
+            use_proxy: defaults.use_proxy === true,
+          }
+        : {}
+    );
+  };
+
+  const resume = async () => {
+    if (!resumeRun) return;
+    setBusy("resume");
+    setError(null);
+    try {
+      await resumeConsoleRun(resumeRun.name, resumeForm);
+      setResumeRun(null);
+      setResumeProject(null);
+      await onChanged();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "继续任务失败");
+    } finally {
       setBusy(null);
     }
   };
@@ -139,6 +194,28 @@ export function TaskWorkspace({
             创建第一个项目
           </button>
         </div>
+        <RunHistory
+          runs={historyRuns}
+          allRuns={runs}
+          projects={projects}
+          currentProject={project}
+          historyFilter={historyFilter}
+          onHistoryFilter={setHistoryFilter}
+          activeJobs={activeJobs}
+          disabled={busy !== null}
+          resumeRun={resumeRun}
+          resumeProject={resumeProject}
+          resumeForm={resumeForm}
+          profiles={status?.profiles ?? []}
+          onOpenResume={openResume}
+          onCancelResume={() => {
+            setResumeRun(null);
+            setResumeProject(null);
+          }}
+          onResumeForm={setResumeForm}
+          onResume={resume}
+          busy={busy}
+        />
       </div>
     );
   }
@@ -158,34 +235,6 @@ export function TaskWorkspace({
       await onChanged();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "启动任务失败");
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const openResume = (run: RunListEntry) => {
-    const defaultProfile = project.defaults.profile_id || "environment";
-    setResumeRun(run);
-    setResumeForm({
-      profile_id: defaultProfile,
-      model: project.defaults.model,
-      max_turns: project.defaults.max_turns,
-      max_budget_usd: project.defaults.max_budget_usd,
-      instruction: "",
-      use_proxy: project.defaults.use_proxy === true,
-    });
-  };
-
-  const resume = async () => {
-    if (!resumeRun) return;
-    setBusy("resume");
-    setError(null);
-    try {
-      await resumeConsoleRun(resumeRun.name, resumeForm);
-      setResumeRun(null);
-      await onChanged();
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "继续任务失败");
     } finally {
       setBusy(null);
     }
@@ -476,14 +525,23 @@ export function TaskWorkspace({
         </section>
 
         <RunHistory
-          runs={projectRuns}
+          runs={historyRuns}
+          allRuns={runs}
+          projects={projects}
+          currentProject={project}
+          historyFilter={historyFilter}
+          onHistoryFilter={setHistoryFilter}
           activeJobs={activeJobs}
           disabled={busy !== null}
           resumeRun={resumeRun}
+          resumeProject={resumeProject}
           resumeForm={resumeForm}
           profiles={status?.profiles ?? []}
           onOpenResume={openResume}
-          onCancelResume={() => setResumeRun(null)}
+          onCancelResume={() => {
+            setResumeRun(null);
+            setResumeProject(null);
+          }}
           onResumeForm={setResumeForm}
           onResume={resume}
           busy={busy}
@@ -839,9 +897,15 @@ function severityStyle(severity: string): string {
 
 function RunHistory({
   runs,
+  allRuns,
+  projects,
+  currentProject,
+  historyFilter,
+  onHistoryFilter,
   activeJobs,
   disabled,
   resumeRun,
+  resumeProject,
   resumeForm,
   profiles,
   onOpenResume,
@@ -851,9 +915,15 @@ function RunHistory({
   busy,
 }: {
   runs: RunListEntry[];
+  allRuns: RunListEntry[];
+  projects: ConsoleProject[];
+  currentProject: ConsoleProject | undefined;
+  historyFilter: HistoryFilter;
+  onHistoryFilter: (filter: HistoryFilter) => void;
   activeJobs: ConsoleJob[];
   disabled: boolean;
   resumeRun: RunListEntry | null;
+  resumeProject: ConsoleProject | null;
   resumeForm: ResumePayload;
   profiles: NonNullable<ConsoleStatus>["profiles"];
   onOpenResume: (run: RunListEntry) => void;
@@ -863,11 +933,18 @@ function RunHistory({
   busy: string | null;
 }) {
   const activeNames = new Set(activeJobs.map((job) => job.run_name));
+  const projectRuns = runsForHistoryFilter("project", currentProject, allRuns);
+  const unassignedRuns = runsForHistoryFilter("unassigned", currentProject, allRuns);
+  const filters: Array<{ key: HistoryFilter; label: string; count: number }> = [
+    { key: "all", label: "全部任务", count: allRuns.length },
+    { key: "project", label: "当前项目", count: projectRuns.length },
+    { key: "unassigned", label: "未分配", count: unassignedRuns.length },
+  ];
   return (
     <aside className="h-fit overflow-hidden rounded-xl bg-white/[0.018] ring-1 ring-inset ring-white/[0.08] xl:sticky xl:top-[84px]">
       <div className="flex items-center gap-2 border-b border-white/[0.07] px-4 py-4">
         <Clock3 className="h-4 w-4 text-[#777]" />
-        <h2 className="text-sm font-semibold">项目任务</h2>
+        <h2 className="text-sm font-semibold">历史任务</h2>
         <span className="ml-auto text-[11px] tabular-nums text-[#555]">{runs.length}</span>
       </div>
       {resumeRun ? (
@@ -875,6 +952,11 @@ function RunHistory({
           <div>
             <p className="text-xs font-semibold">继续 {resumeRun.name}</p>
             <p className="mt-1 text-[11px] leading-5 text-[#626262]">恢复完整 Agent 历史，并可覆盖模型、预算和新指令。</p>
+            {(!resumeProject || isUnassignedRun(resumeRun)) && (
+              <p className="mt-2 rounded-md bg-amber-400/[0.06] px-3 py-2 text-[11px] leading-5 text-amber-200 ring-1 ring-inset ring-amber-400/20">
+                该任务缺少直接项目关联，将沿用任务已保存的配置；项目归属不会被改变。缺失配置时由后端使用安全默认值。
+              </p>
+            )}
           </div>
           <SelectField
             label="LLM 配置"
@@ -926,23 +1008,55 @@ function RunHistory({
           </div>
         </div>
       ) : (
-        <div className="scrollbar-thin max-h-[720px] overflow-y-auto p-2">
+        <>
+          <div className="grid grid-cols-3 gap-1 border-b border-white/[0.07] p-2">
+            {filters.map((filter) => (
+              <button
+                key={filter.key}
+                type="button"
+                onClick={() => onHistoryFilter(filter.key)}
+                className={`flex min-h-10 min-w-0 items-center justify-center gap-1 rounded-md px-1.5 text-[10px] font-semibold transition-[background-color,color,scale] active:scale-95 ${
+                  historyFilter === filter.key
+                    ? "bg-white/[0.09] text-white"
+                    : "text-[#777] hover:bg-white/[0.04] hover:text-[#bbb]"
+                }`}
+              >
+                <span className="truncate">{filter.label}</span>
+                <span className="flex-none font-mono tabular-nums text-[9px] text-[#666]">{filter.count}</span>
+              </button>
+            ))}
+          </div>
+          <div className="scrollbar-thin max-h-[720px] overflow-y-auto p-2">
           {runs.length === 0 ? (
             <div className="px-4 py-12 text-center">
               <FileSearch className="mx-auto h-5 w-5 text-[#4f4f4f]" />
-              <p className="mt-3 text-xs text-[#606060]">该项目还没有任务记录</p>
+              <p className="mt-3 text-xs text-[#606060]">
+                {historyFilter === "all"
+                  ? "还没有历史任务记录"
+                  : historyFilter === "project"
+                    ? "当前项目还没有任务记录"
+                    : "没有未分配任务"}
+              </p>
             </div>
           ) : (
             runs.map((run) => {
               const findings = Object.values(run.severity_counts).reduce((sum, value) => sum + value, 0);
               const current = activeNames.has(run.name);
+              const sourceLabel = projectLabelForRun(run, projects);
               return (
                 <div key={run.name} className={`rounded-lg px-3 py-3 ${current ? "bg-white/[0.07]" : "hover:bg-white/[0.035]"}`}>
                   <div className="flex items-start gap-2">
                     {run.finished ? <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 text-emerald-400" /> : <Activity className="mt-0.5 h-3.5 w-3.5 text-amber-300" />}
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-xs font-semibold text-[#ddd]" title={run.target ?? run.name}>{run.target || run.name}</p>
-                      <p className="mt-1 flex gap-2 text-[10px] text-[#555]"><span>{run.scan_mode ?? "unknown"}</span><span>·</span><span>{findings} 个发现</span></p>
+                      <p className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-[#555]">
+                        <span>{run.scan_mode ?? "unknown"}</span><span>·</span><span>{findings} 个发现</span>
+                        {(historyFilter === "all" || historyFilter === "unassigned") && (
+                          <span className="max-w-full truncate rounded bg-white/[0.06] px-1.5 py-0.5 text-[#888]" title={sourceLabel}>
+                            {sourceLabel}
+                          </span>
+                        )}
+                      </p>
                     </div>
                   </div>
                   <div className="mt-2 flex gap-1.5 pl-[22px]">
@@ -955,7 +1069,8 @@ function RunHistory({
               );
             })
           )}
-        </div>
+          </div>
+        </>
       )}
     </aside>
   );
