@@ -26,6 +26,8 @@ def _write_run(
     status: str = "running",
     end_time: str | None = None,
     findings: list[dict[str, Any]] | None = None,
+    agent_statuses: dict[str, str] | None = None,
+    errors: dict[str, str] | None = None,
 ) -> Path:
     run_dir = tmp_path / "strix_runs" / "console_snapshot"
     state_dir = run_dir / ".state"
@@ -45,9 +47,10 @@ def _write_run(
     (state_dir / "agents.json").write_text(
         json.dumps(
             {
-                "statuses": {"root": "running", "done": "completed"},
+                "statuses": agent_statuses or {"root": "running", "done": "completed"},
                 "names": {"root": "Strix", "done": "Recon"},
                 "parent_of": {"root": None, "done": "root"},
+                "errors": errors or {},
             }
         ),
         encoding="utf-8",
@@ -127,12 +130,15 @@ def test_snapshot_completed_uses_terminal_stage_and_finish_time(tmp_path: Path) 
         end_time="2026-01-01T00:05:00Z",
         findings=[],
     )
+    (run_dir / "penetration_test_report.md").write_text("# report", encoding="utf-8")
     snapshot = build_run_snapshot(
         run_dir,
         now=datetime(2026, 1, 1, 0, 10, tzinfo=UTC),
     )
 
     assert snapshot["finished"] is True
+    assert snapshot["completion_state"] == "completed"
+    assert snapshot["completion_signal"] is True
     assert snapshot["stage"]["key"] == "completed"
     assert snapshot["elapsed_seconds"] == 300
 
@@ -161,6 +167,90 @@ def test_snapshot_uses_job_state_and_finish_tool_as_authoritative_progress(tmp_p
     assert stopped["status"] == "stopped"
     assert stopped["stage"]["key"] == "stopped"
     assert stopped["elapsed_seconds"] == 300
+
+
+def test_snapshot_marks_agent_errors_incomplete_and_counts_reasons(tmp_path: Path) -> None:
+    run_dir = _write_run(
+        tmp_path,
+        status="stopped",
+        end_time="2026-01-01T00:05:00Z",
+        findings=[],
+        agent_statuses={"root": "crashed", "turns": "stopped", "timeout": "crashed"},
+        errors={
+            "turns": "Max turns (40) exceeded",
+            "root": "ReadTimeout",
+            "timeout": "httpx.ReadTimeout",
+        },
+    )
+    snapshot = build_run_snapshot(run_dir)
+
+    assert snapshot["completion_state"] == "incomplete"
+    assert snapshot["completion_signal"] is False
+    assert snapshot["finished"] is False
+    assert snapshot["error_counts"]["max_turns"] == 1
+    assert snapshot["error_counts"]["read_timeout"] == 2
+    assert snapshot["error_counts"]["crashed_agents"] == 2
+    assert snapshot["report_available"] is False
+    assert snapshot["completion_evidence"]["finish_scan"] is False
+    detail = snapshot["termination_reason"]["detail"]
+    assert "最大轮次" in detail
+    assert "模型请求超时" in detail
+    assert "finish_scan" in detail
+    assert "最终报告" in detail
+
+
+def test_snapshot_finds_finish_scan_outside_recent_activity_tail(tmp_path: Path) -> None:
+    run_dir = _write_run(
+        tmp_path,
+        status="completed",
+        end_time="2026-01-01T00:05:00Z",
+        findings=[],
+    )
+    _write_db(run_dir)
+    _append_tool_call(run_dir, "finish_scan", "2026-01-01T00:01:00Z")
+    for index in range(12):
+        _append_tool_call(run_dir, f"shell_{index}", f"2026-01-01T00:0{2 + index}:00Z")
+
+    snapshot = build_run_snapshot(run_dir)
+
+    assert snapshot["completion_state"] == "completed"
+    assert snapshot["completion_signal"] is True
+    assert snapshot["completion_evidence"]["finish_scan"] is True
+    assert snapshot["completion_evidence"]["finish_scan_calls"] == 1
+
+
+def test_snapshot_config_allowlist_does_not_expose_secrets(tmp_path: Path) -> None:
+    run_dir = _write_run(tmp_path, status="stopped", end_time="2026-01-01T00:05:00Z")
+    settings_dir = run_dir.parent / ".console"
+    settings_dir.mkdir()
+    (settings_dir / "run-settings.json").write_text(
+        json.dumps(
+            {
+                run_dir.name: {
+                    "profile_id": "profile-1",
+                    "profile_name": "Test profile",
+                    "model": "safe-model",
+                    "max_turns": 40,
+                    "max_budget_usd": 1.5,
+                    "use_proxy": True,
+                    "report_language": "zh-CN",
+                    "api_key": "sk-do-not-return",
+                    "token": "token-do-not-return",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    snapshot = build_run_snapshot(run_dir)
+    serialized = json.dumps(snapshot, ensure_ascii=False)
+
+    assert snapshot["config"]["model"] == "safe-model"
+    assert snapshot["config"]["max_turns"] == 40
+    assert snapshot["config"]["use_proxy"] is True
+    assert "sk-do-not-return" not in serialized
+    assert "token-do-not-return" not in serialized
+    assert "api_key" not in serialized
 
 
 def test_snapshot_degrades_for_missing_or_corrupt_artifacts(tmp_path: Path) -> None:

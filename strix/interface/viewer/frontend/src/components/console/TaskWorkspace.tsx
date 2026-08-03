@@ -3,6 +3,7 @@ import {
   Activity,
   ArrowUpRight,
   CheckCircle2,
+  ChevronDown,
   ChevronRight,
   CircleStop,
   Clock3,
@@ -16,6 +17,7 @@ import {
   TriangleAlert,
 } from "lucide-react";
 import {
+  fetchConsoleRunSnapshot,
   launchConsoleJob,
   resumeConsoleRun,
   stopConsoleJob,
@@ -25,6 +27,7 @@ import {
   type LaunchPayload,
   type ResumePayload,
   type RunSnapshot,
+  type RunCompletionState,
   type ScanDefaults,
 } from "@/data/consoleSource";
 import type { ConsoleLiveTask } from "@/components/ConsoleApp";
@@ -58,6 +61,13 @@ function launchDefaults(project: ConsoleProject): LaunchPayload {
     confirmation: "",
   };
 }
+
+type HistorySnapshotState = {
+  expanded: boolean;
+  loading: boolean;
+  snapshot: RunSnapshot | null;
+  error: string | null;
+};
 
 export function TaskWorkspace({
   projects,
@@ -94,6 +104,7 @@ export function TaskWorkspace({
   const [resumeProject, setResumeProject] = useState<ConsoleProject | null>(null);
   const [resumeForm, setResumeForm] = useState<ResumePayload>({});
   const [historyFilter, setHistoryFilter] = useState<HistoryFilter>("all");
+  const [historyDetails, setHistoryDetails] = useState<Record<string, HistorySnapshotState>>({});
 
   useEffect(() => {
     if (!project) {
@@ -172,6 +183,44 @@ export function TaskWorkspace({
     }
   };
 
+  const toggleHistoryDetails = async (runName: string) => {
+    const current = historyDetails[runName];
+    if (current?.loading) return;
+    if (current?.expanded) {
+      setHistoryDetails((previous) => ({
+        ...previous,
+        [runName]: { ...current, expanded: false },
+      }));
+      return;
+    }
+    setHistoryDetails((previous) => ({
+      ...previous,
+      [runName]: {
+        expanded: true,
+        loading: true,
+        snapshot: current?.snapshot ?? null,
+        error: null,
+      },
+    }));
+    try {
+      const snapshot = await fetchConsoleRunSnapshot(runName);
+      setHistoryDetails((previous) => ({
+        ...previous,
+        [runName]: { expanded: true, loading: false, snapshot, error: null },
+      }));
+    } catch (cause) {
+      setHistoryDetails((previous) => ({
+        ...previous,
+        [runName]: {
+          expanded: true,
+          loading: false,
+          snapshot: current?.snapshot ?? null,
+          error: cause instanceof Error ? cause.message : "无法读取任务详情",
+        },
+      }));
+    }
+  };
+
   if (!project || !form) {
     return (
       <div className="min-w-0 space-y-5">
@@ -215,6 +264,8 @@ export function TaskWorkspace({
           onResumeForm={setResumeForm}
           onResume={resume}
           busy={busy}
+          historyDetails={historyDetails}
+          onToggleDetails={toggleHistoryDetails}
         />
       </div>
     );
@@ -545,6 +596,8 @@ export function TaskWorkspace({
           onResumeForm={setResumeForm}
           onResume={resume}
           busy={busy}
+          historyDetails={historyDetails}
+          onToggleDetails={toggleHistoryDetails}
         />
       </div>
     </div>
@@ -913,6 +966,8 @@ function RunHistory({
   onResumeForm,
   onResume,
   busy,
+  historyDetails,
+  onToggleDetails,
 }: {
   runs: RunListEntry[];
   allRuns: RunListEntry[];
@@ -931,6 +986,8 @@ function RunHistory({
   onResumeForm: (form: ResumePayload) => void;
   onResume: () => void;
   busy: string | null;
+  historyDetails: Record<string, HistorySnapshotState>;
+  onToggleDetails: (runName: string) => Promise<void>;
 }) {
   const activeNames = new Set(activeJobs.map((job) => job.run_name));
   const projectRuns = runsForHistoryFilter("project", currentProject, allRuns);
@@ -1043,14 +1100,20 @@ function RunHistory({
               const findings = Object.values(run.severity_counts).reduce((sum, value) => sum + value, 0);
               const current = activeNames.has(run.name);
               const sourceLabel = projectLabelForRun(run, projects);
+              const detail = historyDetails[run.name];
+              const completionState = historyCompletionState(run, detail?.snapshot ?? null);
               return (
                 <div key={run.name} className={`rounded-lg px-3 py-3 ${current ? "bg-white/[0.07]" : "hover:bg-white/[0.035]"}`}>
                   <div className="flex items-start gap-2">
-                    {run.finished ? <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 text-emerald-400" /> : <Activity className="mt-0.5 h-3.5 w-3.5 text-amber-300" />}
+                    <HistoryStateIcon
+                      state={completionState}
+                      error={run.status === "failed" || (detail?.snapshot?.error_counts.read_timeout ?? 0) > 0}
+                    />
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-xs font-semibold text-[#ddd]" title={run.target ?? run.name}>{run.target || run.name}</p>
                       <p className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-[#555]">
                         <span>{run.scan_mode ?? "unknown"}</span><span>·</span><span>{findings} 个发现</span>
+                        <span>{historyStateLabel(completionState)}</span>
                         {(historyFilter === "all" || historyFilter === "unassigned") && (
                           <span className="max-w-full truncate rounded bg-white/[0.06] px-1.5 py-0.5 text-[#888]" title={sourceLabel}>
                             {sourceLabel}
@@ -1059,9 +1122,20 @@ function RunHistory({
                       </p>
                     </div>
                   </div>
+                  <div className="mt-2 pl-[22px]">
+                    <button
+                      type="button"
+                      onClick={() => void onToggleDetails(run.name)}
+                      aria-expanded={detail?.expanded ?? false}
+                      className="flex min-h-10 items-center gap-1 rounded-md px-2 text-[10px] text-[#888] ring-1 ring-inset ring-white/[0.08] transition-[background-color,color,scale] hover:bg-white/[0.04] hover:text-white active:scale-95"
+                    >
+                      详情 <ChevronDown className={`h-3 w-3 transition-transform ${detail?.expanded ? "rotate-180" : ""}`} />
+                    </button>
+                    {detail?.expanded && <RunHistoryDetails state={detail} />}
+                  </div>
                   <div className="mt-2 flex gap-1.5 pl-[22px]">
-                    <a href={`/?run=${encodeURIComponent(run.name)}`} target="_blank" rel="noreferrer" className="flex min-h-10 items-center gap-1 rounded-md px-2 text-[10px] text-[#888] ring-1 ring-inset ring-white/[0.08] hover:text-white active:scale-95">结果 <ExternalLink className="h-3 w-3" /></a>
-                    {!current && !run.finished && !(run.status === "running" && run.managed !== true) && (
+                    <a href={`/?run=${encodeURIComponent(run.name)}`} target="_blank" rel="noreferrer" className="flex min-h-10 items-center gap-1 rounded-md px-2 text-[10px] text-[#888] ring-1 ring-inset ring-white/[0.08] hover:text-white active:scale-95">{completionState === "completed" ? "查看已写入结果" : "查看 Agent 轨迹"} <ExternalLink className="h-3 w-3" /></a>
+                    {!current && completionState !== "completed" && !(run.status === "running" && run.managed !== true) && (
                       <button type="button" disabled={disabled} onClick={() => onOpenResume(run)} className="flex min-h-10 items-center gap-1 rounded-md px-2 text-[10px] text-[#888] ring-1 ring-inset ring-white/[0.08] hover:text-white active:scale-95 disabled:opacity-30"><RotateCcw className="h-3 w-3" /> 继续</button>
                     )}
                   </div>
@@ -1073,6 +1147,103 @@ function RunHistory({
         </>
       )}
     </aside>
+  );
+}
+
+function historyCompletionState(run: RunListEntry, snapshot: RunSnapshot | null): RunCompletionState {
+  if (snapshot) return snapshot.completion_state;
+  if (run.status === "completed") return run.report_available === true ? "completed" : "unknown";
+  if (run.status === "running" || run.status === "stopping") return "running";
+  if (run.status === "stopped" || run.status === "failed") return "incomplete";
+  return "unknown";
+}
+
+function historyStateLabel(state: RunCompletionState): string {
+  if (state === "completed") return "已完成";
+  if (state === "incomplete") return "未完整完成";
+  if (state === "running") return "进行中";
+  return "证据不足";
+}
+
+function HistoryStateIcon({ state, error = false }: { state: RunCompletionState; error?: boolean }) {
+  if (state === "completed") {
+    return <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 flex-none text-emerald-400" aria-hidden="true" />;
+  }
+  if (state === "incomplete") {
+    return <TriangleAlert className={`mt-0.5 h-3.5 w-3.5 flex-none ${error ? "text-red-300" : "text-amber-300"}`} aria-hidden="true" />;
+  }
+  return <Activity className="mt-0.5 h-3.5 w-3.5 flex-none text-sky-300" aria-hidden="true" />;
+}
+
+function RunHistoryDetails({ state }: { state: HistorySnapshotState }) {
+  if (state.loading && !state.snapshot) {
+    return <p className="mt-2 rounded-md bg-black/25 px-3 py-3 text-[10px] text-[#777]">正在读取 Agent 轨迹…</p>;
+  }
+  if (state.error && !state.snapshot) {
+    return <p className="mt-2 rounded-md bg-red-500/[0.06] px-3 py-3 text-[10px] leading-5 text-red-200">详情读取失败：{state.error}</p>;
+  }
+  const snapshot = state.snapshot;
+  if (!snapshot) {
+    return <p className="mt-2 rounded-md bg-black/25 px-3 py-3 text-[10px] text-[#777]">暂无可用详情。</p>;
+  }
+
+  const conclusion =
+    snapshot.completion_state === "completed" && snapshot.findings_total === 0
+      ? "已完成，0 个已验证发现"
+      : historyStateLabel(snapshot.completion_state);
+  const conclusionStyle =
+    snapshot.completion_state === "completed"
+      ? "border-emerald-400/20 bg-emerald-400/[0.07] text-emerald-200"
+      : snapshot.completion_state === "incomplete"
+        ? "border-amber-400/20 bg-amber-400/[0.07] text-amber-100"
+        : snapshot.completion_state === "running"
+          ? "border-sky-400/20 bg-sky-400/[0.07] text-sky-100"
+          : "border-white/[0.12] bg-white/[0.04] text-[#ccc]";
+  const errors = snapshot.error_counts;
+  const config = snapshot.config;
+  const toolCalls = snapshot.recent_activity.filter((item) => item.kind === "tool_call").length;
+  return (
+    <div className="mt-2 min-w-0 space-y-2 rounded-md bg-black/25 p-3 ring-1 ring-inset ring-white/[0.07]">
+      <div className={`rounded-md border px-3 py-2 ${conclusionStyle}`}>
+        <p className="text-[11px] font-semibold">{conclusion}</p>
+        <p className="mt-1 break-words text-[10px] leading-5 opacity-80">{snapshot.termination_reason.detail}</p>
+      </div>
+      {state.error && <p className="break-words text-[10px] text-amber-200">详情刷新提示：{state.error}</p>}
+      <div className="grid min-w-0 grid-cols-2 gap-2 sm:grid-cols-3">
+        <HistoryFact label="运行时长" value={formatDuration(snapshot.elapsed_seconds)} />
+        <HistoryFact label="最后活动" value={snapshot.last_activity_at ? formatTimestamp(snapshot.last_activity_at) : "暂无"} />
+        <HistoryFact label="Agent" value={`${formatCount(snapshot.agent_stats.total ?? 0)} 个`} />
+        <HistoryFact label="事件" value={formatCount(snapshot.event_count)} />
+        <HistoryFact label="最近工具调用" value={formatCount(toolCalls)} />
+        <HistoryFact label="发现" value={formatCount(snapshot.findings_total)} />
+      </div>
+      <div className="grid min-w-0 grid-cols-2 gap-x-3 gap-y-2 border-t border-white/[0.06] pt-2 text-[10px]">
+        <HistoryFact label="最大轮次异常" value={formatCount(errors.max_turns)} />
+        <HistoryFact label="请求超时" value={formatCount(errors.read_timeout)} />
+        <HistoryFact label="崩溃 Agent" value={formatCount(errors.crashed_agents)} />
+        <HistoryFact label="finish_scan" value={snapshot.completion_evidence.finish_scan ? "已检测" : "未检测"} />
+        <HistoryFact label="报告产物" value={snapshot.report_available ? "已生成" : "不可用"} />
+        <HistoryFact label="任务状态" value={snapshot.status} />
+      </div>
+      <div className="grid min-w-0 grid-cols-2 gap-x-3 gap-y-2 border-t border-white/[0.06] pt-2 text-[10px]">
+        <HistoryFact label="LLM 配置" value={config.profile_name || config.profile_id || "未记录"} breakAll />
+        <HistoryFact label="模型" value={config.model || "未记录"} breakAll />
+        <HistoryFact label="最大轮次" value={config.max_turns == null ? "未记录" : String(config.max_turns)} />
+        <HistoryFact label="预算" value={config.max_budget_usd == null ? "不限制/未记录" : `$${config.max_budget_usd}`} />
+        <HistoryFact label="代理" value={config.use_proxy == null ? "未记录" : config.use_proxy ? "使用代理" : "直连"} />
+        <HistoryFact label="报告语言" value={config.report_language || "未记录"} />
+        <HistoryFact label="原始任务" value={snapshot.run_name} breakAll />
+      </div>
+    </div>
+  );
+}
+
+function HistoryFact({ label, value, breakAll = false }: { label: string; value: string; breakAll?: boolean }) {
+  return (
+    <div className="min-w-0">
+      <p className="text-[#555]">{label}</p>
+      <p className={`mt-0.5 min-w-0 text-[#bbb] ${breakAll ? "break-all" : "truncate"}`} title={value}>{value}</p>
+    </div>
   );
 }
 

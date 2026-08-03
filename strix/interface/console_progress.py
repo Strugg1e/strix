@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
@@ -33,6 +34,8 @@ _FINDINGS_LIMIT = 8
 _ACTIVITY_LIMIT = 10
 _TITLE_LIMIT = 240
 _VALUE_LIMIT = 512
+_LOG_TAIL_BYTES = 128 * 1024
+_MAX_DIAGNOSTIC_AGENTS = 100
 
 
 def build_run_snapshot(
@@ -83,13 +86,35 @@ def build_run_snapshot(
     findings_total = len(findings["all"])
     report_exists = (run_dir / "penetration_test_report.md").is_file()
 
+    completion_evidence = _completion_evidence(run_dir)
+    error_counts = _error_counts(run_dir, agents)
+    completion_state = _completion_state(
+        status=status,
+        end_time=end_time,
+        finish_scan=completion_evidence["finish_scan"],
+        report_exists=report_exists,
+        error_counts=error_counts,
+    )
+    completion_signal = completion_state == "completed"
+    termination_reason = _termination_reason(
+        status=status,
+        completion_state=completion_state,
+        completion_signal=completion_signal,
+        finish_scan=completion_evidence["finish_scan"],
+        report_exists=report_exists,
+        error_counts=error_counts,
+    )
+    artifacts = _artifact_state(run_dir, report_exists, findings_total)
+    config = _config_summary(run_dir, run_name, record, job)
+
     stage = _stage(
         status=status,
+        completion_state=completion_state,
         event_count=event_count,
         agent_stats=agent_stats,
         findings_total=findings_total,
         reporting_started=report_exists
-        or any(item.get("tool") == "finish_scan" for item in activities),
+        or completion_evidence["finish_scan"],
     )
     last_activity_at = _latest_timestamp(
         db_last_activity,
@@ -101,7 +126,15 @@ def build_run_snapshot(
     return {
         "run_name": run_name,
         "status": status,
-        "finished": status in _TERMINAL_STATUSES and bool(end_time),
+        "finished": completion_state == "completed",
+        "completion_state": completion_state,
+        "completion_signal": completion_signal,
+        "completion_evidence": completion_evidence,
+        "termination_reason": termination_reason,
+        "error_counts": error_counts,
+        "report_available": report_exists,
+        "artifacts": artifacts,
+        "config": config,
         "start_time": start_time,
         "end_time": end_time,
         "started_at": start_time,
@@ -265,15 +298,298 @@ def _finding_summaries(vulnerabilities: list[dict[str, Any]]) -> dict[str, Any]:
     return {"all": all_items, "recent": list(reversed(all_items[-_FINDINGS_LIMIT:]))}
 
 
+def _completion_evidence(run_dir: Path) -> dict[str, Any]:
+    """Read durable completion evidence without exposing transcript contents."""
+
+    db_path = runtime_state_dir(run_dir) / "agents.db"
+    finish_scan_calls = 0
+    conn: sqlite3.Connection | None = None
+    try:
+        if not db_path.is_file():
+            return {"finish_scan": False, "finish_scan_calls": 0}
+        conn = sqlite3.connect(
+            f"file:{db_path}?mode=ro",
+            uri=True,
+            timeout=0.2,
+            check_same_thread=False,
+        )
+        # Search the complete persisted message set, rather than the ten-row
+        # activity tail used for the live timeline.  Parse each candidate so a
+        # prompt mentioning finish_scan cannot become a false completion signal.
+        rows = conn.execute(
+            "select message_data from agent_messages "
+            "where lower(message_data) like '%finish_scan%'",
+        ).fetchall()
+    except (sqlite3.Error, OSError, TypeError, ValueError):
+        logger.debug("Unable to read completion evidence from %s", db_path, exc_info=True)
+        return {"finish_scan": False, "finish_scan_calls": 0}
+    finally:
+        if conn is not None:
+            conn.close()
+
+    for (raw_message,) in rows:
+        item = _json_object(raw_message)
+        if _function_call_name(item) == "finish_scan":
+            finish_scan_calls += 1
+    return {
+        "finish_scan": finish_scan_calls > 0,
+        "finish_scan_calls": finish_scan_calls,
+    }
+
+
+def _function_call_name(item: Mapping[str, Any]) -> str:
+    if _safe_text(item.get("type"), fallback="") != "function_call":
+        return ""
+    name = item.get("name")
+    if not isinstance(name, str):
+        function = item.get("function")
+        name = function.get("name") if isinstance(function, dict) else ""
+    return _safe_text(name, fallback="").lower()
+
+
+def _error_counts(run_dir: Path, snapshot: Mapping[str, Any]) -> dict[str, int]:
+    """Classify persisted agent errors and a bounded log tail into safe counts."""
+
+    errors = snapshot.get("errors")
+    statuses = snapshot.get("statuses")
+    status_values = statuses.items() if isinstance(statuses, dict) else ()
+
+    max_turn_agents = {
+        str(agent_id)
+        for agent_id, error in (errors.items() if isinstance(errors, dict) else ())
+        if _contains_max_turns(error)
+    }
+    timeout_agents = {
+        str(agent_id)
+        for agent_id, error in (errors.items() if isinstance(errors, dict) else ())
+        if _contains_read_timeout(error)
+    }
+    crashed_agents = {
+        str(agent_id)
+        for agent_id, status in status_values
+        if _safe_text(status, fallback="").lower() == "crashed"
+    }
+
+    log_text = _read_log_tail(run_dir / "strix.log")
+    log_max_agents, log_timeout_agents, log_crashed_agents = _classify_log_tail(log_text)
+    max_turn_agents.update(log_max_agents)
+    timeout_agents.update(log_timeout_agents)
+    crashed_agents.update(log_crashed_agents)
+
+    # If an older run has only an unstructured log line, preserve a conservative
+    # one-event signal without counting repeated traceback lines as new agents.
+    max_turn_count = len(max_turn_agents)
+    if max_turn_count == 0 and re.search(r"max\s+turns?\b", log_text, re.IGNORECASE):
+        max_turn_count = 1
+    timeout_count = len(timeout_agents)
+    if timeout_count == 0 and re.search(r"(?:httpx|httpcore)\.ReadTimeout", log_text):
+        timeout_count = 1
+
+    return {
+        "max_turns": min(max_turn_count, _MAX_DIAGNOSTIC_AGENTS),
+        "read_timeout": min(timeout_count, _MAX_DIAGNOSTIC_AGENTS),
+        "crashed_agents": min(len(crashed_agents), _MAX_DIAGNOSTIC_AGENTS),
+        "failed_agents": min(
+            sum(
+                1
+                for _agent_id, status in (statuses.items() if isinstance(statuses, dict) else ())
+                if _safe_text(status, fallback="").lower() == "failed"
+            ),
+            _MAX_DIAGNOSTIC_AGENTS,
+        ),
+    }
+
+
+def _contains_max_turns(value: Any) -> bool:
+    return bool(re.search(r"max\s+turns?\b", _safe_text(value, fallback=""), re.IGNORECASE))
+
+
+def _contains_read_timeout(value: Any) -> bool:
+    return bool(
+        re.search(
+            r"(?:httpx|httpcore)\.ReadTimeout|read\s*timeout",
+            _safe_text(value, fallback=""),
+            re.IGNORECASE,
+        )
+    )
+
+
+def _read_log_tail(path: Path) -> str:
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, 2)
+            size = handle.tell()
+            handle.seek(max(0, size - _LOG_TAIL_BYTES))
+            return handle.read(_LOG_TAIL_BYTES).decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _classify_log_tail(text: str) -> tuple[set[str], set[str], set[str]]:
+    max_turn_agents: set[str] = set()
+    timeout_agents: set[str] = set()
+    crashed_agents: set[str] = set()
+    current_agent: str | None = None
+    for line in text.splitlines():
+        match = re.search(
+            r"agent run failed for ([^;\s]+); parking as ([a-z_]+)",
+            line,
+            re.IGNORECASE,
+        )
+        if match:
+            current_agent = match.group(1)[:80]
+            if match.group(2).lower() == "crashed":
+                crashed_agents.add(current_agent)
+        if current_agent is None:
+            continue
+        if re.search(r"max\s+turns?\b", line, re.IGNORECASE):
+            max_turn_agents.add(current_agent)
+        if re.search(r"(?:httpx|httpcore)\.ReadTimeout|read\s*timeout", line, re.IGNORECASE):
+            timeout_agents.add(current_agent)
+    return max_turn_agents, timeout_agents, crashed_agents
+
+
+def _completion_state(
+    *,
+    status: str,
+    end_time: str | None,
+    finish_scan: bool,
+    report_exists: bool,
+    error_counts: Mapping[str, int],
+) -> str:
+    if status in {"running", "stopping"} and not end_time:
+        return "running"
+    if status == "completed":
+        return "completed" if finish_scan or report_exists else "unknown"
+    if status in {"stopped", "failed", "interrupted"}:
+        return "incomplete"
+    if status == "running":
+        return "running"
+    if any(
+        error_counts.get(key, 0)
+        for key in ("max_turns", "read_timeout", "crashed_agents", "failed_agents")
+    ):
+        return "incomplete"
+    return "unknown"
+
+
+def _termination_reason(
+    *,
+    status: str,
+    completion_state: str,
+    completion_signal: bool,
+    finish_scan: bool,
+    report_exists: bool,
+    error_counts: Mapping[str, int],
+) -> dict[str, str]:
+    if completion_state == "running":
+        return {"kind": "running", "label": "进行中", "detail": "Agent 仍在执行扫描"}
+    if completion_signal:
+        return {"kind": "completed", "label": "已完成", "detail": "检测到完成信号与结果产物"}
+
+    causes: list[str] = []
+    if error_counts.get("max_turns", 0):
+        causes.append(f"达到最大轮次 {error_counts['max_turns']} 个 Agent")
+    if error_counts.get("read_timeout", 0):
+        causes.append(f"模型请求超时 {error_counts['read_timeout']} 个 Agent")
+    if error_counts.get("crashed_agents", 0):
+        causes.append(f"崩溃 Agent {error_counts['crashed_agents']} 个")
+    if not finish_scan:
+        causes.append("未检测到 finish_scan")
+    if not report_exists:
+        causes.append("未生成最终报告")
+    detail = "；".join(causes) or "缺少可确认的完成证据"
+
+    if completion_state == "incomplete":
+        kind = (
+            "agent_error"
+            if error_counts.get("max_turns", 0) or error_counts.get("read_timeout", 0)
+            else status
+        )
+        return {"kind": kind, "label": "异常未完整完成", "detail": detail}
+    return {"kind": "unknown", "label": "状态证据不足", "detail": detail}
+
+
+def _artifact_state(run_dir: Path, report_exists: bool, findings_total: int) -> dict[str, Any]:
+    vulnerabilities_available = (run_dir / "vulnerabilities.json").is_file()
+    sarif_available = (run_dir / "findings.sarif").is_file()
+    if report_exists:
+        state = "complete"
+    elif vulnerabilities_available or findings_total or sarif_available:
+        state = "partial"
+    else:
+        state = "missing"
+    return {
+        "state": state,
+        "report_available": report_exists,
+        "vulnerabilities_available": vulnerabilities_available,
+        "sarif_available": sarif_available,
+        "findings_count": findings_total,
+    }
+
+
+def _config_summary(
+    run_dir: Path,
+    run_name: str,
+    record: Mapping[str, Any],
+    job: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    settings_root = _read_object(run_dir.parent / ".console" / "run-settings.json")
+    settings = settings_root.get(run_name)
+    settings = settings if isinstance(settings, dict) else {}
+
+    def value(key: str) -> Any:
+        if job and key in job and job.get(key) not in (None, ""):
+            return job.get(key)
+        if settings.get(key) not in (None, ""):
+            return settings.get(key)
+        return record.get(key)
+
+    profile_id = _safe_config_text(value("profile_id"))
+    profile_name = _safe_config_text(value("profile_name"))
+    return {
+        "scan_mode": _safe_config_text(value("scan_mode")),
+        "scope_mode": _safe_config_text(value("scope_mode")),
+        "max_turns": _safe_config_number(value("max_turns"), integer=True),
+        "max_budget_usd": _safe_config_number(value("max_budget_usd")),
+        "profile_id": profile_id,
+        "profile_name": profile_name,
+        "profile": {"id": profile_id, "name": profile_name},
+        "model": _safe_config_text(value("model")),
+        "use_proxy": value("use_proxy") if isinstance(value("use_proxy"), bool) else None,
+        "report_language": _safe_config_text(value("report_language")),
+    }
+
+
+def _safe_config_text(value: Any) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()[:_VALUE_LIMIT]
+    return re.sub(
+        r"(?i)(api[_ -]?key|access[_ -]?token|secret|password)\s*[:=]\s*[^\s,;]+",
+        r"\1=[REDACTED]",
+        text,
+    )
+
+
+def _safe_config_number(value: Any, *, integer: bool = False) -> int | float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    if integer:
+        return max(0, int(value))
+    return max(0.0, float(value))
+
+
 def _stage(
     *,
     status: str,
+    completion_state: str,
     event_count: int,
     agent_stats: Mapping[str, int],
     findings_total: int,
     reporting_started: bool,
 ) -> dict[str, Any]:
-    if status == "completed":
+    if completion_state == "completed":
         key = "completed"
     elif status == "failed":
         key = "failed"

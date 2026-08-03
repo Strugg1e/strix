@@ -1,5 +1,6 @@
 import {
   fetchRunSummary,
+  fetchReportMarkdown,
   fetchTranscript,
   fetchVulnerabilities,
   type RunListEntry,
@@ -123,10 +124,59 @@ export interface RunSnapshotActivity {
   tool?: string;
 }
 
+export type RunCompletionState = "running" | "completed" | "incomplete" | "unknown";
+
+export interface RunSnapshotTerminationReason {
+  kind: string;
+  label: string;
+  detail: string;
+}
+
+export interface RunSnapshotCompletionEvidence {
+  finish_scan: boolean;
+  finish_scan_calls: number;
+}
+
+export interface RunSnapshotErrorCounts {
+  max_turns: number;
+  read_timeout: number;
+  crashed_agents: number;
+  failed_agents: number;
+}
+
+export interface RunSnapshotArtifacts {
+  state: "complete" | "partial" | "missing" | string;
+  report_available: boolean;
+  vulnerabilities_available: boolean;
+  sarif_available: boolean;
+  findings_count: number;
+}
+
+export interface RunSnapshotConfig {
+  scan_mode: string | null;
+  scope_mode: string | null;
+  max_turns: number | null;
+  max_budget_usd: number | null;
+  profile_id: string | null;
+  profile_name: string | null;
+  profile: { id: string | null; name: string | null };
+  model: string | null;
+  use_proxy: boolean | null;
+  report_language: string | null;
+}
+
 export interface RunSnapshot {
   run_name: string;
   status: RunSnapshotStatus;
   finished: boolean;
+  completion_state: RunCompletionState;
+  completion_signal: boolean;
+  completion_evidence: RunSnapshotCompletionEvidence;
+  termination_reason: RunSnapshotTerminationReason;
+  error_counts: RunSnapshotErrorCounts;
+  report_available: boolean;
+  artifacts: RunSnapshotArtifacts;
+  config: RunSnapshotConfig;
   start_time: string | null;
   end_time: string | null;
   started_at: string | null;
@@ -229,10 +279,11 @@ export async function fetchConsoleRunSnapshot(runName: string): Promise<RunSnaps
 }
 
 async function fetchLegacyRunSnapshot(runName: string): Promise<RunSnapshot> {
-  const { summary, finished } = await fetchRunSummary(runName);
-  const [transcript, vulnerabilities] = await Promise.all([
+  const { summary } = await fetchRunSummary(runName);
+  const [transcript, vulnerabilities, reportMarkdown] = await Promise.all([
     fetchTranscript(runName).catch(() => ({ agents: [], events: [] })),
     fetchVulnerabilities(summary.runId, runName).catch(() => []),
+    fetchReportMarkdown(runName).catch(() => null),
   ]);
   const status = normalizeSnapshotStatus(summary.status);
   const startTime = summary.startTime;
@@ -290,7 +341,23 @@ async function fetchLegacyRunSnapshot(runName: string): Promise<RunSnapshot> {
     };
   });
 
-  const reportingStarted = recentActivity.some((item) => item.tool === "finish_scan");
+  const finishScanCalls = transcript.events.filter(
+    (event) => event.data.tool_name === "finish_scan"
+  ).length;
+  const finishScan = finishScanCalls > 0;
+  const reportAvailable = Boolean(reportMarkdown);
+  const completionState: RunCompletionState =
+    status === "running" || status === "stopping"
+      ? "running"
+      : status === "completed" && (finishScan || reportAvailable)
+        ? "completed"
+        : status === "stopped" || status === "failed"
+          ? "incomplete"
+          : status === "completed" || status === "unknown"
+            ? "unknown"
+            : "unknown";
+  const completionSignal = completionState === "completed";
+  const reportingStarted = finishScan || reportAvailable;
   const stage = legacyStage(status, findings.length, transcript.events.length, reportingStarted);
   const lastActivity = [...recentActivity]
     .reverse()
@@ -298,7 +365,46 @@ async function fetchLegacyRunSnapshot(runName: string): Promise<RunSnapshot> {
   return {
     run_name: runName,
     status,
-    finished,
+    finished: completionSignal,
+    completion_state: completionState,
+    completion_signal: completionSignal,
+    completion_evidence: {
+      finish_scan: finishScan,
+      finish_scan_calls: finishScanCalls,
+    },
+    termination_reason: legacyTerminationReason(
+      completionState,
+      completionSignal,
+      finishScan,
+      reportAvailable,
+      status
+    ),
+    error_counts: {
+      max_turns: 0,
+      read_timeout: 0,
+      crashed_agents: agentStats.crashed ?? 0,
+      failed_agents: agentStats.failed ?? 0,
+    },
+    report_available: reportAvailable,
+    artifacts: {
+      state: reportAvailable ? "complete" : vulnerabilities.length > 0 ? "partial" : "missing",
+      report_available: reportAvailable,
+      vulnerabilities_available: vulnerabilities.length > 0,
+      sarif_available: false,
+      findings_count: findings.length,
+    },
+    config: {
+      scan_mode: summary.scanMode,
+      scope_mode: null,
+      max_turns: null,
+      max_budget_usd: null,
+      profile_id: null,
+      profile_name: null,
+      profile: { id: null, name: null },
+      model: null,
+      use_proxy: null,
+      report_language: null,
+    },
     start_time: startTime,
     end_time: endTime,
     started_at: startTime,
@@ -321,6 +427,31 @@ async function fetchLegacyRunSnapshot(runName: string): Promise<RunSnapshot> {
     result_url: `/?run=${encodeURIComponent(runName)}`,
     source: "legacy",
   };
+}
+
+function legacyTerminationReason(
+  completionState: RunCompletionState,
+  completionSignal: boolean,
+  finishScan: boolean,
+  reportAvailable: boolean,
+  status: RunSnapshotStatus
+): RunSnapshotTerminationReason {
+  if (completionState === "running") {
+    return { kind: "running", label: "进行中", detail: "Agent 仍在执行扫描" };
+  }
+  if (completionSignal) {
+    return { kind: "completed", label: "已完成", detail: "检测到完成信号与结果产物" };
+  }
+  const detail = [
+    !finishScan ? "未检测到 finish_scan" : "",
+    !reportAvailable ? "未生成最终报告" : "",
+  ]
+    .filter(Boolean)
+    .join("；") || "缺少可确认的完成证据";
+  if (completionState === "incomplete") {
+    return { kind: status, label: "异常未完整完成", detail };
+  }
+  return { kind: "unknown", label: "状态证据不足", detail };
 }
 
 function normalizeSnapshotStatus(status: string | null): RunSnapshotStatus {
