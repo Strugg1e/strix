@@ -6,6 +6,7 @@ flow through to the root agent's ``build_strix_agent`` call.
 
 from __future__ import annotations
 
+import json
 import types
 from typing import Any
 
@@ -175,3 +176,43 @@ async def test_root_prompt_options_default_to_none(
     kwargs = captured["kwargs"]
     assert kwargs["instructions_override"] is None
     assert kwargs["system_prompt_context"] == {"scope": "built-in"}
+
+
+@pytest.mark.asyncio
+async def test_console_managed_resume_restarts_failed_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    """An explicit Web-console resume must not park a previously failed root."""
+    _patch_engine_scaffold(monkeypatch, tmp_path, {})
+    (tmp_path / "agents.json").write_text(
+        json.dumps(
+            {
+                "statuses": {"root": "failed"},
+                "parent_of": {"root": None},
+                "names": {"root": "Strix"},
+                "metadata": {"root": {"task": "task", "skills": []}},
+                "pending_counts": {"root": 0},
+                "errors": {"root": "previous provider quota exhausted"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "agents.db").touch()
+    captured: dict[str, Any] = {}
+
+    async def _capture_loop(*_args: Any, **kwargs: Any) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(runner, "run_agent_loop", _capture_loop)
+
+    await runner.run_strix_scan(
+        scan_config={"targets": [], "scan_mode": "deep", "console_managed": True},
+        scan_id="scan-console-resume",
+        image="img",
+        coordinator=AgentCoordinator(),
+        interactive=True,
+    )
+
+    assert captured["agent_id"] == "root"
+    assert captured["start_parked"] is False

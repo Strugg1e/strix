@@ -256,7 +256,7 @@ export default function Sidebar({
             {finished && (
               <NavItem
                 icon={<Mail className="h-4 w-4" />}
-                label="导出报告"
+                label="邮件发送"
                 active={view === "email"}
                 onClick={onOpenEmail}
               />

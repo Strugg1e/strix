@@ -18,7 +18,8 @@ import re
 import secrets
 from datetime import datetime
 from io import BytesIO
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import Any
 
 from pypdf import PdfReader, PdfWriter
 from reportlab.lib import colors
@@ -26,6 +27,8 @@ from reportlab.lib.enums import TA_CENTER
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen import canvas as pdfcanvas
 from reportlab.platypus import (
     Flowable,
@@ -46,10 +49,6 @@ from strix.interface.viewer.transcript import (
 )
 
 
-if TYPE_CHECKING:
-    from pathlib import Path
-
-
 # Palette lifted from the cloud report theme (styles/base.ts, docx/theme.ts).
 _INK = colors.HexColor("#000000")
 _TEXT = colors.HexColor("#1a1a1a")
@@ -66,10 +65,61 @@ _SEVERITY_COLORS = {
     "low": colors.HexColor("#2563eb"),
 }
 
-# Helvetica stands in for Geist: a clean sans with no font file to ship.
-_SANS = "Helvetica"
-_SANS_BOLD = "Helvetica-Bold"
+# Noto Sans SC is bundled so the report is self-contained and renders Chinese
+# without relying on whatever fonts happen to be installed on the host. The
+# static instances are generated from the OFL-licensed Google Fonts variable
+# font; see ``fonts/README.md`` and ``fonts/OFL.txt``.
+_FONT_DIR = Path(__file__).with_name("fonts")
+_REGULAR_FONT_PATH = _FONT_DIR / "NotoSansSC-Regular.ttf"
+_BOLD_FONT_PATH = _FONT_DIR / "NotoSansSC-Bold.ttf"
+_SANS = "StrixNotoSansSC"
+_SANS_BOLD = "StrixNotoSansSC-Bold"
 _MONO = "Courier"
+
+
+def _register_report_fonts() -> None:
+    """Register the bundled report fonts exactly once.
+
+    Failing loudly when a packaged font is missing is preferable to silently
+    falling back to Helvetica, which cannot render CJK text and produces black
+    squares in otherwise valid reports.
+    """
+    missing = [str(path) for path in (_REGULAR_FONT_PATH, _BOLD_FONT_PATH) if not path.is_file()]
+    if missing:
+        joined = ", ".join(missing)
+        raise RuntimeError(f"Bundled PDF report fonts are missing: {joined}")
+
+    registered = set(pdfmetrics.getRegisteredFontNames())
+    if _SANS not in registered:
+        pdfmetrics.registerFont(TTFont(_SANS, str(_REGULAR_FONT_PATH)))
+    if _SANS_BOLD not in registered:
+        pdfmetrics.registerFont(TTFont(_SANS_BOLD, str(_BOLD_FONT_PATH)))
+    pdfmetrics.registerFontFamily(
+        _SANS,
+        normal=_SANS,
+        bold=_SANS_BOLD,
+        italic=_SANS,
+        boldItalic=_SANS_BOLD,
+    )
+    pdfmetrics.registerFontFamily(
+        _SANS_BOLD,
+        normal=_SANS_BOLD,
+        bold=_SANS_BOLD,
+        italic=_SANS_BOLD,
+        boldItalic=_SANS_BOLD,
+    )
+
+
+_register_report_fonts()
+
+
+# ReportLab's built-in Courier remains the base face for code blocks, keeping
+# ASCII/URL/PoC alignment unchanged. CJK runs are switched to the embedded
+# Noto face with a nested ``<font>`` span because Courier has no CJK glyphs.
+_CJK_RUN_RE = re.compile(
+    r"([\u2e80-\u2fff\u3000-\u303f\u3040-\u30ff\u3400-\u4dbf"
+    r"\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef\U00020000-\U0002fa1f]+)"
+)
 
 _PAGE_W, _PAGE_H = A4
 
@@ -79,10 +129,39 @@ def _esc(value: Any) -> str:
     return html.escape(str(value)).replace("\n", "<br/>")
 
 
+def _code_markup(value: Any, *, color: str | None = None, base_face: str | None = None) -> str:
+    """Escape code text and use the embedded face for CJK runs.
+
+    Courier is retained for ASCII so URLs, PoCs, indentation, and other
+    monospaced snippets keep their existing layout. ReportLab's standard
+    Courier has no CJK glyphs, so only runs that need them are wrapped in the
+    bundled Noto Sans SC face.
+    """
+    raw = str(value)
+    pieces: list[str] = []
+    cursor = 0
+    for match in _CJK_RUN_RE.finditer(raw):
+        pieces.append(html.escape(raw[cursor : match.start()]))
+        pieces.append(f'<font face="{_SANS}">{html.escape(match.group(1))}</font>')
+        cursor = match.end()
+    pieces.append(html.escape(raw[cursor:]))
+    markup = "".join(pieces).replace("\n", "<br/>")
+    if base_face and color:
+        return f'<font face="{base_face}" color="{color}">{markup}</font>'
+    if base_face:
+        markup = f'<font face="{base_face}">{markup}</font>'
+    if color:
+        markup = f'<font color="{color}">{markup}</font>'
+    return markup
+
+
 class _NumberedCanvas(pdfcanvas.Canvas):  # type: ignore[misc]  # reportlab base is untyped
     """Two-pass canvas that prints 'Page X of Y' on every page after the cover."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
+        # Start drawing with a registered face rather than selecting
+        # Helvetica, which cannot render CJK text.
+        kwargs.setdefault("initialFontName", _SANS)
         super().__init__(*args, **kwargs)
         self._saved_states: list[dict[str, Any]] = []
 
@@ -423,8 +502,7 @@ def _inline_md(text: str) -> str:
     seg = re.sub(r"\*(.+?)\*", r"<i>\1</i>", seg)
 
     def _restore(match: re.Match[str]) -> str:
-        inner = html.escape(codes[int(match.group(1))])
-        return f'<font face="{_MONO}" color="#b31d28">{inner}</font>'
+        return _code_markup(codes[int(match.group(1))], color="#b31d28", base_face=_MONO)
 
     return re.sub(r"\x00(\d+)\x00", _restore, seg)
 
@@ -468,7 +546,7 @@ def _markdown_flowables(  # noqa: PLR0915 - cohesive block parser, splitting hur
                 code.append(lines[i])
                 i += 1
             i += 1  # closing fence
-            flow.append(Paragraph(_esc("\n".join(code)) or "&nbsp;", styles["code"]))
+            flow.append(Paragraph(_code_markup("\n".join(code)) or "&nbsp;", styles["code"]))
             continue
         if not stripped:
             flush_para()
@@ -522,7 +600,7 @@ def _field_block(
         return []
     flow: list[Flowable] = [Paragraph(label.upper(), styles["field_label"])]
     if code:
-        flow.append(Paragraph(_esc(value), styles["code"]))
+        flow.append(Paragraph(_code_markup(value), styles["code"]))
     else:
         flow.extend(_markdown_flowables(str(value), styles))
     return flow

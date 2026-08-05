@@ -11,6 +11,7 @@ from pypdf import PdfReader
 from pypdf.errors import WrongPasswordError
 
 from strix.interface.viewer.report_pdf import (
+    _inline_md,
     build_encrypted_report,
     encrypt_pdf,
     generate_password,
@@ -22,35 +23,51 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def _make_run(base: Path, name: str = "sample") -> Path:
+def _make_run(base: Path, name: str = "sample", *, chinese: bool = False) -> Path:
     run_dir = base / "strix_runs" / name
     run_dir.mkdir(parents=True)
     record = {
         "run_name": name,
-        "targets_info": [{"original": "https://example.com"}],
+        "targets_info": [
+            {"original": "https://example.com/中文" if chinese else "https://example.com"}
+        ],
         "scan_mode": "deep",
         "status": "completed",
         "start_time": "2026-01-01T00:00:00Z",
         "end_time": "2026-01-01T01:02:03Z",
         "scan_results": {
-            "executive_summary": "Summary with an ampersand & an <angle> bracket.",
-            "recommendations": "Patch things.",
+            "executive_summary": (
+                "中文摘要:发现漏洞。\n\n- 缺少输入验证\n- 需要升级依赖。使用 `中文参数`。"
+                '\n\n```python\n# 中文代码块\nprint("测试")\n```'
+                "\n\n### **加粗中文标题**"
+                if chinese
+                else "Summary with an ampersand & an <angle> bracket."
+            ),
+            "recommendations": "修复建议:更新依赖。" if chinese else "Patch things.",
         },
     }
     (run_dir / "run.json").write_text(json.dumps(record), encoding="utf-8")
     vulns = [
         {
-            "title": "SQL Injection",
+            "title": "SQL 注入漏洞" if chinese else "SQL Injection",
             "severity": "CRITICAL",
             "cvss": 9.8,
-            "description": "User input reaches the query.",
-            "impact": "Full database read.",
-            "technical_analysis": "Details here.",
-            "poc_description": "Send a crafted parameter.",
-            "poc_script_code": "print('exploit')",
-            "evidence": "HTTP 500 with SQL error.",
-            "remediation_steps": ["Use parameterized queries", "Validate input"],
-            "target": "https://example.com",
+            "description": "描述:用户输入未验证。" if chinese else "User input reaches the query.",
+            "impact": "影响:数据库泄露。" if chinese else "Full database read.",
+            "technical_analysis": "技术分析:参数存在注入。" if chinese else "Details here.",
+            "poc_description": "PoC 描述:发送中文参数." if chinese else "Send a crafted parameter.",
+            "poc_script_code": (
+                '# 中文代码\nprint("https://example.com/?q=测试")\n  indented()'
+                if chinese
+                else "print('exploit')"
+            ),
+            "evidence": "证据:HTTP 500。" if chinese else "HTTP 500 with SQL error.",
+            "remediation_steps": (
+                ["使用参数化查询", "验证输入"]
+                if chinese
+                else ["Use parameterized queries", "Validate input"]
+            ),
+            "target": "https://example.com/中文" if chinese else "https://example.com",
             "endpoint": "/login",
             "method": "POST",
         },
@@ -65,6 +82,48 @@ def test_generate_report_pdf_has_pdf_header(tmp_path: Path) -> None:
     pdf = generate_report_pdf(run_dir)
     assert pdf.startswith(b"%PDF-")
     assert len(pdf) > 1000
+
+
+def test_generate_report_pdf_embeds_cjk_fonts_and_preserves_code(tmp_path: Path) -> None:
+    run_dir = _make_run(tmp_path, chinese=True)
+    pdf = generate_report_pdf(run_dir)
+    reader = PdfReader(BytesIO(pdf))
+    extracted = "\n".join(page.extract_text() or "" for page in reader.pages)
+
+    for expected in (
+        "中文摘要",
+        "SQL 注入漏洞",
+        "用户输入未验证",
+        "中文代码",
+        "中文代码块",
+        "测试",
+        "中文参数",
+        "加粗中文标题",
+    ):
+        assert expected in extracted
+    assert not any(marker in extracted for marker in ("■", "□", "�"))
+
+    embedded_fonts: set[str] = set()
+    for page in reader.pages:
+        resources = page.get("/Resources")
+        assert resources is not None
+        for font_ref in resources.get("/Font", {}).values():
+            font = font_ref.get_object()
+            base_font = str(font.get("/BaseFont", ""))
+            if "NotoSansSC" not in base_font:
+                continue
+            descriptor_ref = font.get("/FontDescriptor")
+            assert descriptor_ref is not None
+            descriptor = descriptor_ref.get_object()
+            assert descriptor.get("/FontFile2") is not None
+            embedded_fonts.add(base_font)
+
+    assert any("NotoSansSC-Regular" in name for name in embedded_fonts)
+    assert any("NotoSansSC-Bold" in name for name in embedded_fonts)
+    assert _inline_md("inline `curl  -X POST`") == (
+        'inline <font face="Courier" color="#b31d28">curl  -X POST</font>'
+    )
+    assert 'face="Courier"' in _inline_md("inline `curl  -X POST 中文`")
 
 
 def test_generate_password_is_long_and_random() -> None:

@@ -164,6 +164,18 @@ def _get(url: str, *, cookie: str | None = None) -> tuple[int, str, bytes]:
         return resp.status, resp.headers.get("Content-Type", ""), resp.read()
 
 
+def _get_download(
+    url: str, path: str, *, cookie: str | None = None
+) -> tuple[int, Mapping[str, str], bytes]:
+    headers = {"Cookie": cookie} if cookie else {}
+    req = urllib.request.Request(url + path, headers=headers)  # noqa: S310 - localhost test server
+    try:
+        with urllib.request.urlopen(req) as resp:  # noqa: S310 - localhost test server  # nosec B310
+            return int(resp.status), dict(resp.headers.items()), resp.read()
+    except urllib.error.HTTPError as exc:
+        return int(exc.code), dict(exc.headers.items()), exc.read()
+
+
 def test_server_serves_api_and_static(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     run_dir = _make_run(tmp_path, "served", status="completed", end_time="2026-01-01T00:00:00Z")
 
@@ -544,6 +556,108 @@ def test_report_send_rejects_live_run(tmp_path: Path, monkeypatch: pytest.Monkey
     try:
         status, _ = _post(url, "/api/report/send", {}, cookie=_session_cookie(url, token))
         assert status == 409
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_report_download_requires_session_and_finished_known_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    finished = _make_run(
+        tmp_path, "download", status="completed", end_time="2026-01-01T00:00:00Z"
+    )
+    other = _make_run(
+        tmp_path, "other-download", status="completed", end_time="2026-01-01T00:00:00Z"
+    )
+    live = _make_run(tmp_path, "live-download", status="running", end_time=None)
+    _bundle(tmp_path, monkeypatch)
+
+    generated: list[Path] = []
+
+    def fake_generate(run_dir: Path) -> bytes:
+        generated.append(run_dir)
+        return b"%PDF-1.7\nlocal report"
+
+    monkeypatch.setattr(
+        "strix.interface.viewer.report_pdf.generate_report_pdf", fake_generate
+    )
+
+    httpd, url, token = serve(finished, open_browser=False)
+    try:
+        # The report contains sensitive finding detail, so a bare reachable
+        # port cannot download it even for the launched run.
+        status, _, _ = _get_download(url, "/api/report/download")
+        assert status == 403
+        assert generated == []
+
+        cookie = _session_cookie(url, token)
+        status, _, _ = _get_download(
+            url, "/api/report/download?run=does-not-exist", cookie=cookie
+        )
+        assert status == 404
+        assert generated == []
+
+        # A live run is rejected before PDF generation, including when selected
+        # explicitly from the same session.
+        status, _, _ = _get_download(
+            url,
+            f"/api/report/download?run={live.name}",
+            cookie=cookie,
+        )
+        assert status == 409
+        assert generated == []
+
+        status, headers, body = _get_download(url, "/api/report/download", cookie=cookie)
+        assert status == 200
+        assert body == b"%PDF-1.7\nlocal report"
+        assert headers["Content-Type"] == "application/pdf"
+        assert headers["Content-Disposition"] == 'attachment; filename="strix-report-download.pdf"'
+        assert headers["Cache-Control"] == "no-store"
+        assert generated == [finished]
+
+        # A named completed run is resolved under the same session without
+        # consulting email verification; the report remains local-only.
+        status, headers, body = _get_download(
+            url,
+            f"/api/report/download?run={other.name}",
+            cookie=cookie,
+        )
+        assert status == 200
+        assert body == b"%PDF-1.7\nlocal report"
+        assert headers["Content-Disposition"] == (
+            'attachment; filename="strix-report-other-download.pdf"'
+        )
+        assert generated == [finished, other]
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_report_download_sanitizes_content_disposition_filename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = _make_run(
+        tmp_path, "safe-dir", status="completed", end_time="2026-01-01T00:00:00Z"
+    )
+    record = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    record["run_name"] = '../evil";\r\nX-Injected: yes'
+    (run_dir / "run.json").write_text(json.dumps(record), encoding="utf-8")
+    _bundle(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "strix.interface.viewer.report_pdf.generate_report_pdf", lambda _run: b"%PDF"
+    )
+
+    httpd, url, token = serve(run_dir, open_browser=False)
+    try:
+        status, headers, _ = _get_download(
+            url, "/api/report/download", cookie=_session_cookie(url, token)
+        )
+        assert status == 200
+        disposition = headers["Content-Disposition"]
+        assert disposition == 'attachment; filename="strix-report-evil-X-Injected-yes.pdf"'
+        assert "\r" not in disposition and "\n" not in disposition
+        assert "/" not in disposition and "\\" not in disposition
     finally:
         httpd.shutdown()
         httpd.server_close()

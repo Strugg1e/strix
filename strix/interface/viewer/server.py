@@ -125,6 +125,27 @@ def resolve_run_dir(
     return candidate
 
 
+def report_filename(run_name: object) -> str:
+    """Return a safe, ASCII filename for a downloaded report.
+
+    ``run_name`` comes from a run record and is therefore operator-controlled
+    data.  Keep it out of both path components and response-header syntax:
+    control characters, separators, quotes, and non-ASCII punctuation are
+    reduced to hyphens, and the basename is bounded before the ``.pdf`` suffix
+    is added.  The result is safe to use in a quoted ``Content-Disposition``
+    filename parameter without a second escaping layer.
+    """
+    text = str(run_name or "").strip()
+    text = re.sub(r"[\x00-\x1f\x7f]", "", text)
+    text = re.sub(r"[^A-Za-z0-9._-]+", "-", text)
+    text = text.strip(".-")
+    if not text:
+        text = "run"
+    # Keep enough room for the fixed prefix/suffix while preventing a very
+    # large run name from producing an unwieldy response header.
+    return f"strix-report-{text[:80]}.pdf"
+
+
 # Prefix of the cookie carrying the per-process session capability. The bound
 # port is appended (``strix_viewer_session_<port>``) because browsers scope
 # cookies by host only, never by port: concurrent viewers on 127.0.0.1 would
@@ -311,6 +332,9 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
             if path == "/api/auth/status":
                 self._handle_auth_status()
                 return
+            if path == "/api/report/download":
+                self._handle_report_download(query)
+                return
 
             run_values = query.get("run")
             run_param = run_values[0] if run_values else None
@@ -342,6 +366,68 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
                 self._send_json(HTTPStatus.OK, build_run_state(run_dir))
             else:
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "unknown endpoint"})
+
+        def _handle_report_download(self, query: dict[str, list[str]]) -> None:
+            """Send a completed run's locally-rendered PDF to the browser.
+
+            Downloading is deliberately separate from the email/relay flow:
+            it never reads the cached email token and never contacts Strix.  A
+            session capability is still required because the PDF contains full
+            finding detail, including proof-of-concept material.
+            """
+            if not self._has_session():
+                self._send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+                return
+
+            run_values = query.get("run")
+            run_param = run_values[0] if run_values else None
+            run_dir = resolve_run_dir(state.base_dir, run_param, state.run_dir)
+            # ``resolve_run_dir`` validates named runs.  The no-query path uses
+            # the launched run as its default, so check the record explicitly
+            # as well to fail closed when a run was removed while the viewer was
+            # still open.
+            if run_dir is None:
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "unknown run"})
+                return
+            try:
+                resolved_run = run_dir.resolve()
+            except (OSError, RuntimeError):
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "unknown run"})
+                return
+            if (
+                resolved_run.parent != state.base_dir.resolve()
+                or not run_record_path(resolved_run).is_file()
+            ):
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "unknown run"})
+                return
+            run_dir = resolved_run
+
+            summary = read_run_summary(run_dir)
+            if not summary.get("finished", False):
+                self._send_json(HTTPStatus.CONFLICT, {"error": "run_not_finished"})
+                return
+
+            from strix.interface.viewer.report_pdf import generate_report_pdf
+
+            try:
+                pdf_bytes = generate_report_pdf(run_dir)
+            except Exception:
+                logger.exception("unable to generate report PDF for %s", run_dir)
+                self._send_json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"error": "report_generation_failed"},
+                )
+                return
+
+            filename = report_filename(summary.get("run_name") or run_dir.name)
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/pdf")
+            self.send_header("Content-Length", str(len(pdf_bytes)))
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            self.wfile.write(pdf_bytes)
 
         def _handle_console_get(  # noqa: PLR0911
             self, path: str, query: dict[str, list[str]]
@@ -866,4 +952,11 @@ def _open_browser(url: str) -> None:
 open_browser = _open_browser
 
 
-__all__ = ["authorized_url", "bundle_dir", "bundle_is_built", "open_browser", "serve"]
+__all__ = [
+    "authorized_url",
+    "bundle_dir",
+    "bundle_is_built",
+    "open_browser",
+    "report_filename",
+    "serve",
+]

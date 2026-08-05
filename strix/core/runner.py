@@ -389,8 +389,17 @@ async def run_strix_scan(
             root_error = coordinator.errors.get(root_id)
 
         root_recoverable_park = root_status == "waiting" and bool(root_error)
+        # A console-managed resume is an explicit request to continue work, even
+        # when a previous provider failure persisted the root as failed/stopped.
+        # Only the human-driven TUI resume flow should start a terminal root
+        # parked and wait for a later steering message.
+        console_managed = bool(scan_config.get("console_managed", False))
         root_start_parked = bool(
-            interactive and is_resume and root_status != "running" and not root_recoverable_park
+            interactive
+            and is_resume
+            and not console_managed
+            and root_status != "running"
+            and not root_recoverable_park
         )
 
         result = await run_agent_loop(

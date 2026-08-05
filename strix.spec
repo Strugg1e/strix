@@ -32,6 +32,14 @@ for asset in viewer_static.rglob('*'):
         rel_path = asset.relative_to(project_root)
         datas.append((str(asset), str(rel_path.parent)))
 
+# Bundled CJK fonts used by the local PDF report renderer. Keep these beside
+# the package module in the frozen app so reports do not depend on host fonts.
+viewer_fonts = strix_root / 'interface' / 'viewer' / 'fonts'
+for asset in viewer_fonts.rglob('*'):
+    if asset.is_file():
+        rel_path = asset.relative_to(project_root)
+        datas.append((str(asset), str(rel_path.parent)))
+
 datas += collect_data_files('textual')
 
 datas += collect_data_files('tiktoken')

@@ -4,6 +4,8 @@ import {
   AlertCircle,
   Bot,
   Mail,
+  Download,
+  Loader2,
   ChevronDown,
   Radar,
   Rocket,
@@ -30,6 +32,7 @@ import {
   fetchTranscript,
   fetchVulnerabilities,
   forgetAuth,
+  downloadReport,
   type AuthStatus,
   type LoadedRun,
   type RunsPayload,
@@ -381,6 +384,7 @@ function ViewerApp() {
 
               {view === "overview" ? (
                 <OverviewTab
+                  activeRun={activeRun}
                   summary={run.summary}
                   counts={counts}
                   total={run.vulnerabilities.length}
@@ -614,35 +618,78 @@ function dedupeHeadings(md: string): string {
   return out.join("\n");
 }
 
-/** Primary local CTA: email an encrypted PDF. Verify-email affordance, no lock. */
-function EmailReportCta({ onOpenEmail }: { onOpenEmail: () => void }) {
+/** Primary local CTA: download the PDF; email remains an optional secondary path. */
+function EmailReportCta({
+  activeRun,
+  onOpenEmail,
+}: {
+  activeRun: string | null;
+  onOpenEmail: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleDownload = async () => {
+    setBusy(true);
+    setError(null);
+    const result = await downloadReport(activeRun);
+    setBusy(false);
+    if (!result.ok) {
+      const messages: Record<string, string> = {
+        forbidden: "查看器会话已失效，请重新打开授权链接。",
+        unknown_run: "找不到该任务报告，请刷新后重试。",
+        run_not_finished: "任务尚未完成，完成后才能下载报告。",
+        report_generation_failed: "生成 PDF 失败，请稍后重试。",
+        unavailable: "下载服务暂时不可用，请稍后重试。",
+      };
+      setError(messages[result.error] ?? "无法下载报告，请稍后重试。");
+    }
+  };
+
   return (
-    <button
-      onClick={onOpenEmail}
-      className="group w-full cursor-pointer rounded-xl border border-emerald-500/25 bg-emerald-500/[0.06] p-4 text-left transition-colors hover:border-emerald-500/40"
-    >
+    <div className="w-full rounded-xl border border-emerald-500/25 bg-emerald-500/[0.06] p-4">
       <div className="flex items-center gap-3">
         <div
           className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg"
           style={{ border: "1px solid rgba(16,185,129,0.3)", background: "rgba(16,185,129,0.08)" }}
         >
-          <Mail className="h-4 w-4 text-emerald-400" aria-hidden="true" />
+          <Download className="h-4 w-4 text-emerald-400" aria-hidden="true" />
         </div>
         <div className="min-w-0 flex-1">
-          <p className="text-sm font-semibold text-white">将本次任务的加密 PDF 报告发送到邮箱</p>
+          <p className="text-sm font-semibold text-white">下载本次任务的 PDF 报告</p>
           <p className="mt-0.5 text-xs text-[#888]">
-            使用只有你能看到的密钥加密，发送前通过一次性验证码验证邮箱。
+            报告在本机生成，直接保存到浏览器下载目录，无需邮箱验证。
           </p>
         </div>
-        <span className="flex-shrink-0 rounded-lg bg-white px-3 py-1.5 text-xs font-semibold text-black transition-opacity group-hover:opacity-90">
-          导出 PDF 报告
-        </span>
+        <button
+          onClick={() => void handleDownload()}
+          disabled={busy}
+          className="flex flex-shrink-0 cursor-pointer items-center gap-1.5 rounded-lg bg-white px-3 py-1.5 text-xs font-semibold text-black transition-opacity hover:opacity-90 disabled:cursor-wait disabled:opacity-60"
+        >
+          {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />}
+          {busy ? "正在生成…" : "下载 PDF"}
+        </button>
       </div>
-    </button>
+      {error && <p className="mt-3 text-xs text-red-300">{error}</p>}
+      <div className="mt-4 flex items-center gap-3 border-t border-emerald-500/15 pt-3">
+        <Mail className="h-4 w-4 flex-shrink-0 text-[#888]" aria-hidden="true" />
+        <div className="min-w-0 flex-1">
+          <p className="text-xs font-medium text-[#bbb]">发送加密副本到邮箱（可选）</p>
+          <p className="mt-0.5 text-[11px] text-[#666]">需要一次性验证码验证邮箱。</p>
+        </div>
+        <button
+          onClick={onOpenEmail}
+          className="flex-shrink-0 cursor-pointer rounded-lg border border-[#444] px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:border-[#666] hover:bg-[rgba(255,255,255,0.06)]"
+        >
+          邮件发送
+        </button>
+      </div>
+    </div>
   );
 }
 
 function OverviewTab({
+  activeRun,
   summary,
   counts,
   total,
@@ -652,6 +699,7 @@ function OverviewTab({
   agentCount,
   onOpenEmail,
 }: {
+  activeRun: string | null;
   summary: ParsedRunSummary;
   counts: Record<VulnerabilitySeverity, number>;
   total: number;
@@ -684,11 +732,11 @@ function OverviewTab({
         </div>
       )}
 
-      {/* Primary CTA: the one primary on Overview. Hidden until the run is
-          finished, since a live scan would only email a partial report. */}
+      {/* Primary CTA: local download is hidden until the run is finished, since
+          a live scan would only produce a partial report. */}
       {finished && (
         <div className="animate-card-in">
-          <EmailReportCta onOpenEmail={onOpenEmail} />
+          <EmailReportCta activeRun={activeRun} onOpenEmail={onOpenEmail} />
         </div>
       )}
 

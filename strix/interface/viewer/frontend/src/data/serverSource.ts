@@ -4,6 +4,10 @@ import {
   parseVulnerabilitiesJson,
   type ParsedRunSummary,
 } from "@/lib/local-run-parser";
+import {
+  reportDownloadPath,
+  reportFilenameFromContentDisposition,
+} from "@/lib/report-download";
 
 /**
  * Data seam for the local viewer: fetches against the local Python server's
@@ -152,6 +156,9 @@ export type OtpVerifyResult =
 export type SendReportResult =
   | { ok: true; password: string; filename: string }
   | { ok: false; error: string };
+export type DownloadReportResult =
+  | { ok: true; filename: string }
+  | { ok: false; error: string };
 
 async function postJson(
   path: string,
@@ -257,4 +264,47 @@ export async function sendReport(runName?: string | null): Promise<SendReportRes
     };
   }
   return { ok: false, error: String(data.error ?? "unavailable") };
+}
+
+/**
+ * Fetch the locally rendered PDF and trigger a browser download. This endpoint
+ * never contacts the Strix relay or requires email verification; the browser's
+ * existing viewer session cookie is the only authorization it needs.
+ */
+export async function downloadReport(runName?: string | null): Promise<DownloadReportResult> {
+  try {
+    const response = await fetch(reportDownloadPath(runName), {
+      cache: "no-store",
+      credentials: "same-origin",
+    });
+    if (!response.ok) {
+      let error = "unavailable";
+      try {
+        const data = (await response.json()) as { error?: unknown };
+        if (typeof data?.error === "string" && data.error) error = data.error;
+      } catch {
+        /* non-JSON error responses retain the generic code */
+      }
+      return { ok: false, error };
+    }
+
+    const blob = await response.blob();
+    const filename = reportFilenameFromContentDisposition(
+      response.headers.get("Content-Disposition"),
+    );
+    const objectUrl = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = objectUrl;
+    anchor.download = filename;
+    anchor.style.display = "none";
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    // Give the browser time to consume the object URL before releasing it;
+    // revoking synchronously can cancel downloads in some WebKit versions.
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+    return { ok: true, filename };
+  } catch {
+    return { ok: false, error: "unavailable" };
+  }
 }
