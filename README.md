@@ -7,7 +7,8 @@
 查看开发版本：
 
 ```sh
-git clone --branch codex/strix-web-console --single-branch https://github.com/Strugg1e/strix.git
+git clone --branch codex/strix-web-console --single-branch \
+  https://github.com/Strugg1e/strix.git
 cd strix
 ```
 
@@ -16,6 +17,8 @@ cd strix
 下方保留上游介绍、署名与许可说明。
 
 ---
+
+## 上游 Strix 介绍
 
 <p align="center">
   <a href="https://strix.ai/">
