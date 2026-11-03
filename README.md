@@ -1,3 +1,22 @@
+# 本分支说明
+
+这是 [Strix](https://github.com/usestrix/strix) 的个人安全研究分支，不是上游的官方发行版。
+
+本分支的中文 Web 控制台、批量资产管理、PDF 报告导出与恢复扫描改动，见 [PR #1](https://github.com/Strugg1e/strix/pull/1)。**PR 当前是草稿，尚未合入默认 `main`；直接克隆默认分支不会获得这些功能。**
+
+查看开发版本：
+
+```sh
+git clone --branch codex/strix-web-console --single-branch https://github.com/Strugg1e/strix.git
+cd strix
+```
+
+使用与启动方式以开发分支的文档为准。PR 中的测试记录只代表该次提交，不代表稳定发行或真实目标上的完整验证。仅在明确授权的资产上使用。
+
+下方保留上游介绍、署名与许可说明。
+
+---
+
 <p align="center">
   <a href="https://strix.ai/">
     <img src="https://github.com/usestrix/.github/raw/main/imgs/cover.png" alt="Strix Banner" width="100%">
